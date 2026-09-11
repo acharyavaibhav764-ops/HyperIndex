@@ -30,9 +30,6 @@ If the repository is already available locally, open a terminal in its root dire
 Create a file named `.env` in the project root. Use local development credentials such as:
 
 ```dotenv
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=change-me
-POSTGRES_DB=honeywell
 MINIO_ROOT_USER=minioadmin
 MINIO_ROOT_PASSWORD=change-me-too
 ```
@@ -51,7 +48,7 @@ This confirms that Docker Compose can read the environment variables and render 
 
 ### 5. Build and start the services
 
-Start PostgreSQL, MinIO, and the FastAPI backend:
+Start MinIO and the FastAPI backend:
 
 ```powershell
 docker compose up --build
@@ -72,7 +69,6 @@ The services are available at:
 | FastAPI ReDoc | `http://localhost:8000/redoc` |
 | MinIO API | `http://localhost:9000` |
 | MinIO Console | `http://localhost:9001` |
-| PostgreSQL | `localhost:5432` |
 
 ### 6. Verify the backend
 
@@ -85,18 +81,55 @@ curl http://localhost:8000/docs
 Upload a document. Replace the path with a real local file:
 
 ```powershell
-curl.exe -X POST http://localhost:8000/upload -F "file=@C:\path\to\sample.pdf"
+curl.exe -X POST http://localhost:8000/upload `
+	-F "files=@C:\path\to\sample.pdf" `
+	-F "files=@C:\path\to\sample.docx"
 ```
 
-Retrieve metadata for the uploaded file:
+The `files` field is repeatable. In Swagger, select one file, click **Add string item**, select the next file, and then click **Execute**.
 
-```powershell
-curl.exe http://localhost:8000/metadata/sample.pdf
+The response contains the UUID, original filename, and size for every uploaded document. Each document is stored directly in the bucket using its UUID as the object name:
+
+```text
+<bucket-name>/<document-uuid>
 ```
 
 The backend creates the `honeywell-documents` bucket in MinIO when it starts.
 
-### 7. View service logs
+### 8. Chunk and embed uploaded documents
+
+Call the processing endpoint with the UUIDs returned by `/upload`:
+
+```powershell
+curl.exe -X POST http://localhost:8000/chunk-and-embed/<document-uuid>
+```
+
+All chunks and embeddings are stored in ChromaDB. The response returns only chunk text and metadata at indexes `0, 10, 20, ...`; embeddings are not returned to the frontend. In Docker, the API connects to the Chroma service at `http://chroma:8000`; Chroma is exposed locally at `http://localhost:8001`.
+
+To inspect ChromaDB, use `http://localhost:8001/api/v1/heartbeat` to verify that it is running. The Chroma service has no built-in visual dashboard; use the Chroma client or API endpoints against `http://localhost:8001` to inspect collections and records.
+
+### 9. Generate answers locally
+
+Ollama runs in Docker, so you do not need to install Ollama separately on your laptop. Start the stack and download the model once into the persistent `ollama_data` volume:
+
+```powershell
+docker compose up -d --build
+docker compose exec ollama ollama pull llama3.2:3b
+```
+
+Ask a question after indexing at least one document:
+
+```powershell
+curl.exe -X POST http://localhost:8000/generate `
+	-H "Content-Type: application/json" `
+	-d '{"question":"What is this document about?"}'
+```
+
+The endpoint retrieves the five closest chunks from ChromaDB and returns the local model answer with source metadata. The model remains loaded between requests through `keep_alive` and the model files survive container restarts in `ollama_data`.
+
+For GPU acceleration, install the appropriate Docker GPU runtime on the host and configure the Ollama service for it. A CPU-only laptop can use `llama3.2:3b`, but generation will be slower.
+
+### 10. View service logs
 
 View logs for all services:
 
@@ -107,10 +140,10 @@ docker compose logs -f
 View only backend logs:
 
 ```powershell
-docker compose logs -f backend-dev
+docker compose logs -f api
 ```
 
-### 8. Stop the environment
+### 11. Stop the environment
 
 Stop the running containers while preserving local database and object-storage data:
 
@@ -126,11 +159,12 @@ docker compose down --volumes
 
 ## Current Services
 
-The development stack currently contains:
+The development stack contains:
 
-- **PostgreSQL:** relational database service
 - **MinIO:** S3-compatible object storage for uploaded documents
-- **FastAPI backend:** document upload and metadata API
+- **ChromaDB:** Persistent vector database for chunks and embeddings
+- **Ollama:** Local generation model server
+- **FastAPI backend:** multi-document upload API
 
-Document parsing, embeddings, vector search, and the frontend are planned parts of the wider product and are not yet included in the current development stack.
+Document parsing, chunking, embeddings, retrieval, and local generation are included for PDF, text, Markdown, DOCX, and legacy DOC documents.
 

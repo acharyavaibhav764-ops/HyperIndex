@@ -1,26 +1,9 @@
 
 
 services:
-  postgres-dev:
-    image: postgres:16-alpine
-    container_name: postgres_dev
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: honeywell
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  minio-dev:
+  minio:
     image: minio/minio:latest
-    container_name: minio_dev
+    container_name: honeywell_minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -36,30 +19,72 @@ services:
       timeout: 5s
       retries: 5
 
-  backend-dev:
+  chroma:
+    image: chromadb/chroma:0.5.15
+    container_name: honeywell_chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: honeywell_ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: -1
+      OLLAMA_HOST: 0.0.0.0:11434
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  api:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
-    container_name: backend_dev
+    container_name: honeywell_api
     depends_on:
-      postgres-dev:
+      minio:
         condition: service_healthy
-      minio-dev:
+      chroma:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://hruthikesh:Hruthik@db08@postgres-dev:5432/honeywell
-      MINIO_ENDPOINT: minio-dev:9000
+      MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: honeywell-documents
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      CHROMA_COLLECTION: my_documents
+      OLLAMA_HOST: ollama
+      OLLAMA_PORT: "11434"
+      OLLAMA_MODEL: llama3.2:3b
+      RETRIEVAL_K: "5"
       PYTHONUNBUFFERED: "1"
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/code
+      - .:/code
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
-  postgres_data:
   minio_data:
-    
-  
+  chroma_data:
+  ollama_data:
+
