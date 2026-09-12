@@ -1,84 +1,95 @@
-# Honeywell Project
+# Honeywell Virtual Assistant
 
-## Environment Setup
+<p align="center">
+	<img src="https://img.shields.io/badge/HONEYWELL-Document%20Intelligence-EA1B0C?style=for-the-badge&labelColor=111827" alt="Honeywell Document Intelligence" />
+</p>
 
-Follow these steps to run the current development environment locally.
+<p align="center"><strong>Turn operational documents into grounded, searchable answers.</strong><br />Upload files, index their contents, and query a local language model with page-level source metadata.</p>
 
-### 1. Install prerequisites
+<p>
+	<img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11" />
+	<img src="https://img.shields.io/badge/FastAPI-0.115.0-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
+	<img src="https://img.shields.io/badge/MinIO-object%20storage-C72E29?logo=minio&logoColor=white" alt="MinIO" />
+	<img src="https://img.shields.io/badge/ChromaDB-vector%20database-FF6F00" alt="ChromaDB" />
+	<img src="https://img.shields.io/badge/Ollama-local%20LLM-111827" alt="Ollama" />
+	<img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose" />
+</p>
 
-Install the following tools:
+
+
+## 🚀 Features
+
+- 📚 Upload multiple documents in one request.
+- 🧩 Parse `.pdf`, `.txt`, `.md`, `.docx`, and legacy `.doc` files.
+- ✂️ Split extracted text into overlapping chunks and embed it with ChromaDB.
+- 🔎 Retrieve the five closest chunks for each question.
+- 💬 Generate grounded answers with a local Ollama model.
+- 🧾 Return source filenames, page numbers, and vector distances with answers.
+- 💾 Persist documents, vectors, and model data in Docker volumes.
+
+> **Current scope:** this repository exposes the backend API and local service stack. Frontend, versioning, OCR, cancellation, and document deletion are described in [PRD.md](PRD.md) but are not yet implemented here.
+
+
+
+
+
+
+
+
+
+| Layer | Technology | Responsibility |
+| --- | --- | --- |
+| API | FastAPI | Upload, indexing, and generation endpoints |
+| Storage | MinIO | S3-compatible document storage |
+| Retrieval | ChromaDB | Persistent vector collection and similarity search |
+| Generation | Ollama | Local `llama3.2:3b` answer generation |
+| Parsing | `pypdf`, `python-docx`, `antiword` | Text extraction across supported formats |
+
+## 📦 Installation
+
+### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - Git
-- `curl` or another HTTP client for testing the API
+- `curl` or another HTTP client
 
-After installing Docker Desktop, open it and confirm that the Docker engine is running.
-
-### 2. Open the project
-
-Clone the repository and move into the project directory:
+Clone the repository and enter its root:
 
 ```powershell
-git clone <repository-url>
-Set-Location HONEYWELL
+git clone https://github.com/hruthikeshb/honeywell-virtual-assistant.git
+Set-Location honeywell-virtual-assistant
 ```
 
-If the repository is already available locally, open a terminal in its root directory, beside `docker-compose.yml`.
-
-### 3. Create the environment file
-
-Create a file named `.env` in the project root. Use local development credentials such as:
+Create `.env` locally. Do not commit credentials:
 
 ```dotenv
-MINIO_ROOT_USER=minioadmin
-MINIO_ROOT_PASSWORD=change-me-too
+MINIO_ROOT_USER=
+MINIO_ROOT_PASSWORD=
+CHROMA_PATH=
+CHROMA_COLLECTION=
 ```
 
-Replace the example values with your own local credentials. Never commit `.env` or production credentials to source control.
-
-### 4. Validate the configuration
-
-From the project root, run:
+Validate and start the stack:
 
 ```powershell
 docker compose config
-```
-
-This confirms that Docker Compose can read the environment variables and render the service configuration successfully.
-
-### 5. Build and start the services
-
-Start MinIO and the FastAPI backend:
-
-```powershell
-docker compose up --build
-```
-
-Keep this terminal open to view live logs. To start the services in the background, use:
-
-```powershell
 docker compose up --build -d
 ```
 
-The services are available at:
-
-| Service | Address |
+| Service | Local address |
 | --- | --- |
-| FastAPI backend | `http://localhost:8000` |
-| FastAPI Swagger UI | `http://localhost:8000/docs` |
-| FastAPI ReDoc | `http://localhost:8000/redoc` |
+| FastAPI | `http://localhost:8000` |
+| Swagger UI | `http://localhost:8000/docs` |
+| ReDoc | `http://localhost:8000/redoc` |
 | MinIO API | `http://localhost:9000` |
 | MinIO Console | `http://localhost:9001` |
+| Ollama | `http://localhost:11434` |
 
-### 6. Verify the backend
+## ▶️ Usage
 
-Check that the API is responding:
+### 1. Upload documents
 
-```powershell
-curl http://localhost:8000/docs
-```
-
-Upload a document. Replace the path with a real local file:
+The `files` field is repeatable. The response returns a UUID for each uploaded object.
 
 ```powershell
 curl.exe -X POST http://localhost:8000/upload `
@@ -86,38 +97,17 @@ curl.exe -X POST http://localhost:8000/upload `
 	-F "files=@C:\path\to\sample.docx"
 ```
 
-The `files` field is repeatable. In Swagger, select one file, click **Add string item**, select the next file, and then click **Execute**.
+### 2. Index a document
 
-The response contains the UUID, original filename, and size for every uploaded document. Each document is stored directly in the bucket using its UUID as the object name:
-
-```text
-<bucket-name>/<document-uuid>
-```
-
-The backend creates the `honeywell-documents` bucket in MinIO when it starts.
-
-### 8. Chunk and embed uploaded documents
-
-Call the processing endpoint with the UUIDs returned by `/upload`:
+Pass an upload UUID to extract, chunk, embed, and persist its text:
 
 ```powershell
 curl.exe -X POST http://localhost:8000/chunk-and-embed/<document-uuid>
 ```
 
-All chunks and embeddings are stored in ChromaDB. The response returns only chunk text and metadata at indexes `0, 10, 20, ...`; embeddings are not returned to the frontend. In Docker, the API connects to the Chroma service at `http://chroma:8000`; Chroma is exposed locally at `http://localhost:8001`.
+### 3. Ask a question
 
-To inspect ChromaDB, use `http://localhost:8001/api/v1/heartbeat` to verify that it is running. The Chroma service has no built-in visual dashboard; use the Chroma client or API endpoints against `http://localhost:8001` to inspect collections and records.
-
-### 9. Generate answers locally
-
-Ollama runs in Docker, so you do not need to install Ollama separately on your laptop. Start the stack and download the model once into the persistent `ollama_data` volume:
-
-```powershell
-docker compose up -d --build
-docker compose exec ollama ollama pull llama3.2:3b
-```
-
-Ask a question after indexing at least one document:
+The response includes the local model answer and the retrieved source metadata.
 
 ```powershell
 curl.exe -X POST http://localhost:8000/generate `
@@ -125,46 +115,51 @@ curl.exe -X POST http://localhost:8000/generate `
 	-d '{"question":"What is this document about?"}'
 ```
 
-The endpoint retrieves the five closest chunks from ChromaDB and returns the local model answer with source metadata. The model remains loaded between requests through `keep_alive` and the model files survive container restarts in `ollama_data`.
-
-For GPU acceleration, install the appropriate Docker GPU runtime on the host and configure the Ollama service for it. A CPU-only laptop can use `llama3.2:3b`, but generation will be slower.
-
-### 10. View service logs
-
-View logs for all services:
-
-```powershell
-docker compose logs -f
-```
-
-View only backend logs:
-
-```powershell
-docker compose logs -f api
-```
-
-### 11. Stop the environment
-
-Stop the running containers while preserving local database and object-storage data:
+### 4. Stop the stack
 
 ```powershell
 docker compose down
 ```
 
-To stop the containers and delete the persisted local volumes:
+Use `docker compose down --volumes` when you also want to remove local MinIO, ChromaDB, and Ollama data.
+
+## 🔌 API Reference
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/upload` | Upload one or more documents |
+| `POST` | `/chunk-and-embed/{document_id}` | Parse and index one document |
+| `POST` | `/generate` | Retrieve context and generate an answer |
+
+Open [`/docs`](http://localhost:8000/docs) for the executable OpenAPI reference.
+
+## 🧭 Configuration
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MINIO_ENDPOINT` | `minio:9000` | Object storage endpoint inside Compose |
+| `MINIO_BUCKET` | `honeywell-documents` | Document bucket |
+| `CHROMA_HOST` | `chroma` | ChromaDB host inside Compose |
+| `CHROMA_PORT` | `8000` | ChromaDB container port |
+| `CHROMA_COLLECTION` | `my_documents` | Vector collection name |
+| `OLLAMA_MODEL` | `llama3.2:3b` | Local generation model |
+| `RETRIEVAL_K` | `5` | Number of chunks retrieved per question |
+
+View live logs with:
 
 ```powershell
-docker compose down --volumes
+docker compose logs -f
+docker compose logs -f api
 ```
 
-## Current Services
+## 🤝 Contributing
 
-The development stack contains:
+1. Create a focused branch from `main`.
+2. Keep changes small and document behavior changes.
+3. Run `docker compose config` and exercise the affected API flow.
+4. Open an issue for bugs or a pull request with a concise problem statement and test notes.
 
-- **MinIO:** S3-compatible object storage for uploaded documents
-- **ChromaDB:** Persistent vector database for chunks and embeddings
-- **Ollama:** Local generation model server
-- **FastAPI backend:** multi-document upload API
+## 📄 License
 
-Document parsing, chunking, embeddings, retrieval, and local generation are included for PDF, text, Markdown, DOCX, and legacy DOC documents.
+No `LICENSE` file is currently included in this repository. Licensing terms should be added before distributing or reusing the project.
 
