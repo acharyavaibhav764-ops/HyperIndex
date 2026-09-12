@@ -1,28 +1,42 @@
-import os
 from typing import Any
 
 import chromadb
+
+from config import settings
 from .embeddings import Embeddings
 
 
 class Retriever:
-    """Manage ChromaDB vector persistence and semantic query retrieval."""
+    """
+    Manage ChromaDB vector persistence and semantic query retrieval.
+    
+    Attributes:
+        embeddings - Embeddings function
+        chroma_client
+        collection_name
+        collection
+
+    Methods:
+        chroma_location()
+        upsert()
+        retrieve()
+    """
 
     def __init__(self, embeddings: Embeddings | None = None) -> None:
         self.embeddings = embeddings or Embeddings()
 
-        chroma_host = os.getenv("CHROMA_HOST")
+        chroma_host = settings.chroma_host
         if chroma_host:
             self.chroma_client = chromadb.HttpClient(
                 host=chroma_host,
-                port=int(os.getenv("CHROMA_PORT", "8000")),
+                port=settings.chroma_port,
             )
         else:
             self.chroma_client = chromadb.PersistentClient(
-                path=os.getenv("CHROMA_PATH", "./chroma_data")
+                path=settings.chroma_path
             )
 
-        self.collection_name = os.getenv("CHROMA_COLLECTION", "my_documents")
+        self.collection_name = settings.chroma_collection
         self.collection = self.chroma_client.get_or_create_collection(
             name=self.collection_name,
             metadata={"hnsw:space": "cosine"},
@@ -31,10 +45,11 @@ class Retriever:
 
     @property
     def chroma_location(self) -> str:
-        """Return the Chroma endpoint URL or local data directory path."""
-        if os.getenv("CHROMA_HOST"):
-            return f"http://{os.getenv('CHROMA_HOST')}:{os.getenv('CHROMA_PORT', '8000')}"
-        return os.getenv("CHROMA_PATH", "./chroma_data")
+        """Return the Chroma endpoint URL"""
+
+        if settings.chroma_host:
+            return f"http://{settings.chroma_host}:{settings.chroma_port}"
+        return settings.chroma_path
 
     def upsert(
         self,
@@ -44,6 +59,7 @@ class Retriever:
         embeddings: list[list[float]],
     ) -> None:
         """Persist chunk IDs, text, metadata, and embeddings to ChromaDB."""
+
         self.collection.upsert(
             ids=ids,
             documents=documents,
@@ -53,6 +69,7 @@ class Retriever:
 
     def retrieve(self, query: str, k: int = 5) -> dict[str, Any]:
         """Query ChromaDB for the top-k most semantically similar chunks."""
+
         return self.collection.query(
             query_texts=[query],
             n_results=k,

@@ -1,24 +1,33 @@
-"""Document parsers used by the ingestion pipeline."""
-
 import io
 import re
 import subprocess
 import tempfile
 from pathlib import PurePath
 
+from pypdf import PdfReader
 from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
-from pypdf import PdfReader
 
 
 class Parser:
-    """Extract normalized text from the document formats supported by the API."""
+    """
+    Extract normalized text from the document formats supported by the API.
+    
+    Methods:
+        parse() - Main parsing method
+        _parse_pdf() - Parse pdf
+        _parse_docx() - Parse docx
+        _decode_txt() - Parse .txt/.md
+        _parse_doc() - Parse legacy documents .doc
+        _normalise() - Method to normalize text
+    """
 
     _SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx", ".doc"}
 
     def parse(self, content: bytes, filename: str) -> list[tuple[int, str]]:
         """Return non-empty page text as ``(page_number, text)`` pairs."""
+
         suffix = PurePath(filename).suffix.lower()
         if suffix not in self._SUPPORTED_EXTENSIONS:
             supported = ", ".join(sorted(self._SUPPORTED_EXTENSIONS))
