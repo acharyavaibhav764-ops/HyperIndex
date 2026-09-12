@@ -1,5 +1,3 @@
-"""Document upload service backed by MinIO's S3-compatible API."""
-
 import logging
 import os
 from pathlib import PurePath
@@ -13,16 +11,22 @@ logger = logging.getLogger(__name__)
 
 
 class StorageError(Exception):
-    """Represent an expected object-storage failure."""
+    """Represent object storage failure."""
+
+    pass
 
 
-class DocumentService:
-    """Coordinate document validation and storage in MinIO."""
+class Uploader:
+    """MINIO interaction class for file storage:
+
+    Attributes:
+        bucket_name: Target bucket in MinIO
+        client: S3 client
+    """
 
     def __init__(self) -> None:
-        """Configure the S3 client from the container environment."""
         endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
-        self.bucket_name = os.getenv("MINIO_BUCKET", "honeywell-documents")
+        self.bucket_name = os.getenv("MINIO_BUCKET", "honeywell-files")
         self.client = boto3.client(
             "s3",
             endpoint_url=f"http://{endpoint}",
@@ -32,25 +36,25 @@ class DocumentService:
         )
 
     def ensure_bucket(self) -> None:
-        """Create the configured bucket when it does not already exist."""
+        """Check for existence of bucket, else create it."""
         try:
             self.client.head_bucket(Bucket=self.bucket_name)
         except ClientError as error:
             error_code = error.response.get("Error", {}).get("Code")
             if error_code not in {"404", "NoSuchBucket", "NotFound"}:
-                raise StorageError("Unable to check the document bucket") from error
+                raise StorageError("Unable to check the file bucket") from error
             try:
                 self.client.create_bucket(Bucket=self.bucket_name)
             except ClientError as create_error:
-                raise StorageError("Unable to create the document bucket") from create_error
+                raise StorageError("Unable to create the file bucket") from create_error
 
-    def upload_documents(self, files: list[UploadFile]) -> list[dict[str, str]]:
-        """Upload multiple documents and return their storage details."""
-        documents: list[dict[str, str]] = []
+    def upload_files(self, files: list[UploadFile]) -> list[dict[str, str]]:
+        """Upload a list of files to MinIO and return their metadata."""
+        uploaded_files: list[dict[str, str]] = []
         for file in files:
             filename = PurePath(file.filename or "").name
             if not filename:
-                raise ValueError("Every uploaded document must have a filename")
+                raise ValueError("Every uploaded file must have a filename")
 
             try:
                 file.file.seek(0, 2)
@@ -59,10 +63,10 @@ class DocumentService:
             except (OSError, ValueError) as error:
                 raise StorageError(f"Unable to read {filename}") from error
             if size == 0:
-                raise ValueError(f"Document {filename} is empty")
+                raise ValueError(f"File {filename} is empty")
 
-            document_id = str(uuid4())
-            object_key = document_id
+            file_id = str(uuid4())
+            object_key = file_id
             try:
                 extra_args = {
                     "ContentType": file.content_type or "application/octet-stream",
@@ -75,28 +79,28 @@ class DocumentService:
                     ExtraArgs=extra_args,
                 )
             except (ClientError, OSError) as error:
-                logger.exception("Document upload failed", extra={"filename": filename})
+                logger.exception("File upload failed", extra={"filename": filename})
                 raise StorageError(f"Unable to upload {filename}") from error
 
             logger.info("Upload successful | filename=%s | object_key=%s", filename, object_key)
-            documents.append(
+            uploaded_files.append(
                 {
-                    "uuid": document_id,
+                    "uuid": file_id,
                     "filename": filename,
                     "size": str(size),
                 }
             )
 
-        return documents
+        return uploaded_files
 
-    def download_document(self, document_id: str) -> tuple[bytes, str]:
-        """Download a stored document and recover its original filename when possible."""
+    def download_file(self, file_id: str) -> tuple[bytes, str]:
+        """Retrieve raw file bytes and original filename from MinIO."""
         try:
-            response = self.client.get_object(Bucket=self.bucket_name, Key=document_id)
+            response = self.client.get_object(Bucket=self.bucket_name, Key=file_id)
             content = response["Body"].read()
             response["Body"].close()
         except (ClientError, OSError) as error:
-            raise StorageError(f"Unable to download document {document_id}") from error
+            raise StorageError(f"Unable to download file {file_id}") from error
 
-        filename = response.get("Metadata", {}).get("filename", document_id)
+        filename = response.get("Metadata", {}).get("filename", file_id)
         return content, filename
