@@ -1,3 +1,8 @@
+from .document import (
+    DocumentIndexResponse,
+    DocumentUploadItem,
+    DocumentUploadResponse,
+)
 from .file import (
     ChunkItem,
     FileIndexResponse,
@@ -9,6 +14,9 @@ from .query import QueryRequest, QueryResponse, SourceItem
 
 __all__ = [
     "ChunkItem",
+    "DocumentIndexResponse",
+    "DocumentUploadItem",
+    "DocumentUploadResponse",
     "FileIndexResponse",
     "FileUploadItem",
     "FileUploadResponse",
@@ -17,3 +25,4 @@ __all__ = [
     "QueryResponse",
     "SourceItem",
 ]
+

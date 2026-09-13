@@ -37,7 +37,7 @@ class Chunker:
         )
 
     def split(
-        self, pages: list[tuple[int, str]], file_id: str, filename: str
+        self, pages: list[tuple[int, str]], document_id: str, filename: str
     ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
         """Split pages into chunks, returning (chunks, metadatas, chunk_ids)."""
 
@@ -52,7 +52,8 @@ class Chunker:
                 # Metadata
                 metadatas.append(
                     {
-                        "file_id": file_id,
+                        "document_id": document_id,
+                        "file_id": document_id,
                         "filename": filename,
                         "page": page_number,
                         "chunk_index": len(metadatas),
@@ -63,5 +64,6 @@ class Chunker:
         if not chunks:
             raise ValueError(f"File {filename} does not contain extractable text")
 
-        chunk_ids = [f"{file_id}_c{index}" for index in range(len(chunks))]
+        chunk_ids = [f"{document_id}_c{index}" for index in range(len(chunks))]
         return chunks, metadatas, chunk_ids
+
