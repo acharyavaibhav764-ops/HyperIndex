@@ -2,7 +2,6 @@ from contextlib import asynccontextmanager
 import logging
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 from config import settings
 from core import (
@@ -14,6 +13,15 @@ from core import (
     Retriever,
     StorageError,
     Uploader,
+)
+from schemas import (
+    FileIndexResponse,
+    FileUploadItem,
+    FileUploadResponse,
+    HealthResponse,
+    QueryRequest,
+    QueryResponse,
+    SourceItem,
 )
 
 
@@ -58,38 +66,45 @@ async def generation_error_handler(request: Request, exc: GenerationError) -> JS
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-# Schema for representing user query
-class GenerateRequest(BaseModel):
-    question: str
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    summary="Health Check",
+    description="Liveness probe indicating the service is running.",
+)
+async def health_check() -> HealthResponse:
+    return HealthResponse(status="ok", version="1.0.0")
 
 
 @app.post(
     "/upload",
+    response_model=FileUploadResponse,
     summary="Upload multiple files",
     description=(
         "Upload one or more files. In Swagger, choose a file and use "
         "'Add string item' to add more files before executing."
     ),
 )
-async def upload_files(files: list[UploadFile] = File(...)) -> dict:
+async def upload_files(files: list[UploadFile] = File(...)) -> FileUploadResponse:
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
     uploaded_files = uploader.upload_files(files)
 
-    return {
-        "message": "Files uploaded successfully",
-        "count": len(uploaded_files),
-        "files": uploaded_files,
-    }
+    return FileUploadResponse(
+        message="Files uploaded successfully",
+        count=len(uploaded_files),
+        files=[FileUploadItem(**item) for item in uploaded_files],
+    )
 
 
 @app.post(
     "/chunk-and-embed/{file_id}",
+    response_model=FileIndexResponse,
     summary="Chunk and embed one uploaded file",
     description="Read the uploaded file UUID from MinIO and persist its chunks in ChromaDB.",
 )
-async def chunk_and_embed(file_id: str) -> dict:
+async def chunk_and_embed(file_id: str) -> FileIndexResponse:
     # 1. Download raw file
     content, filename = uploader.download_file(file_id)
 
@@ -110,31 +125,22 @@ async def chunk_and_embed(file_id: str) -> dict:
         embeddings=vectors,
     )
 
-    response_chunks = [
-        {
-            "id": chunk_ids[index],
-            "text": chunks[index],
-            "metadata": metadatas[index],
-        }
-        for index in range(0, len(chunks), 10)
-    ]
-    return {
-        "collection": retriever.collection_name,
-        "chroma_location": retriever.chroma_location,
-        "file_id": file_id,
-        "filename": filename,
-        "chunk_count": len(chunks),
-        "returned_chunk_count": len(response_chunks),
-        "chunks": response_chunks,
-    }
+    return FileIndexResponse(
+        file_id=file_id,
+        filename=filename,
+        collection=retriever.collection_name,
+        total_chunks=len(chunks),
+        indexed_chunks=len(chunks),
+    )
 
 
 @app.post(
     "/generate",
+    response_model=QueryResponse,
     summary="Answer a question using indexed documents",
     description="Retrieve relevant ChromaDB chunks and answer with the local Ollama model.",
 )
-async def generate_answer(request: GenerateRequest) -> dict:
+async def generate_answer(request: QueryRequest) -> QueryResponse:
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question must not be empty")
@@ -151,12 +157,12 @@ async def generate_answer(request: GenerateRequest) -> dict:
     prompt = generator.build_prompt(question, documents, metadatas)
     answer = generator.generate(prompt)
 
-    return {
-        "question": question,
-        "answer": answer,
-        "model": generator.model,
-        "sources": [
-            {"metadata": metadata, "distance": distance}
+    return QueryResponse(
+        question=question,
+        answer=answer,
+        model=generator.model,
+        sources=[
+            SourceItem(metadata=metadata, distance=distance)
             for metadata, distance in zip(metadatas, distances)
         ],
-    }
+    )

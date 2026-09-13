@@ -1,3 +1,4 @@
 {
+    "python.defaultInterpreterPath": "${workspaceFolder}/venv/Scripts/python.exe",
     "postman.settings.dotenv-detection-notification-visibility": false
 }
