@@ -55,7 +55,7 @@ class Chunker:
                         "file_id": file_id,
                         "filename": filename,
                         "page": page_number,
-                        "chunk_index": len(chunks),
+                        "chunk_index": len(metadatas),
                     }
                 )
                 chunks.append(chunk)
