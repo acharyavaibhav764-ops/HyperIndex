@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 from pathlib import PurePath
 from uuid import uuid4
 
@@ -57,10 +58,10 @@ class Uploader:
             except ClientError as create_error:
                 raise StorageError("Unable to create the file bucket") from create_error
 
-    def upload_files(self, files: list[UploadFile]) -> list[dict[str, str]]:
+    def upload_files(self, files: list[UploadFile]) -> list[dict[str, Any]]:
         """Upload a list of files to MinIO and return their metadata in a list."""
 
-        uploaded_files: list[dict[str, str]] = []
+        uploaded_files: list[dict[str, Any]] = []
         for file in files:
 
             # Validate existence of filename
@@ -100,9 +101,9 @@ class Uploader:
             logger.info("Upload successful | filename=%s | object_key=%s", filename, object_key)
             uploaded_files.append(
                 {
-                    "uuid": file_id,
+                    "file_id": file_id,
                     "filename": filename,
-                    "size": str(size),
+                    "size_bytes": size,
                 }
             )
 
