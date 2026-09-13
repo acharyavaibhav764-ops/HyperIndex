@@ -1,11 +1,23 @@
-import os
 from typing import Any
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from config import settings
+
 
 class Chunker:
-    """Split extracted page text into overlapping chunks with metadata and unique IDs."""
+    """
+    Split extracted page text into overlapping chunks with metadata and unique IDs.
+    
+    Attributes:
+        chunk_size
+        chunk_overlap
+        separators
+        splitter
+
+    Methods:
+        split()
+    """
 
     def __init__(
         self,
@@ -13,8 +25,10 @@ class Chunker:
         chunk_overlap: int | None = None,
         separators: list[str] | None = None,
     ) -> None:
-        self.chunk_size = chunk_size or int(os.getenv("CHUNK_SIZE", "1000"))
-        self.chunk_overlap = chunk_overlap or int(os.getenv("CHUNK_OVERLAP", "200"))
+        """Configure chunker class"""
+        
+        self.chunk_size = chunk_size or settings.chunk_size
+        self.chunk_overlap = chunk_overlap or settings.chunk_overlap
         self.separators = separators or ["\n\n", "\n", ". ", " ", ""]
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
@@ -26,22 +40,25 @@ class Chunker:
         self, pages: list[tuple[int, str]], file_id: str, filename: str
     ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
         """Split pages into chunks, returning (chunks, metadatas, chunk_ids)."""
+
         chunks: list[str] = []
         metadatas: list[dict[str, Any]] = []
 
         for page_number, page_text in pages:
             for chunk in self.splitter.split_text(page_text):
-                if len(chunk) < 5:
+                if len(chunk) < 5: # Skip micro chunks
                     continue
-                chunks.append(chunk)
+
+                # Metadata
                 metadatas.append(
                     {
                         "file_id": file_id,
                         "filename": filename,
                         "page": page_number,
-                        "chunk_index": len(chunks) - 1,
+                        "chunk_index": len(metadatas),
                     }
                 )
+                chunks.append(chunk)
 
         if not chunks:
             raise ValueError(f"File {filename} does not contain extractable text")
