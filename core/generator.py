@@ -49,7 +49,10 @@ class Generator:
             for document, metadata in zip(documents, metadatas)
         )
         return (
-            f"Context:\n{context}\n\nQuestion: {question}" # SYSTEM PROMPT
+            "Answer the question using only the provided document context. "
+            "If the context does not contain the answer, say that there is "
+            "insufficient information. Include concise source references.\n\n"
+            f"Context:\n{context}\n\nQuestion: {question}"
         )
 
     def generate(self, prompt: str) -> str:

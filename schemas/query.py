@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=10, description="Question for the RAG assistant")
+    question: str = Field(..., min_length=1, description="Question for the RAG assistant")
 
 
 class SourceItem(BaseModel):
