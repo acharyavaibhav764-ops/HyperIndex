@@ -48,8 +48,9 @@ class Generator:
             f"Source: {metadata.get('filename')} | Page: {metadata.get('page')}\n{document}"
             for document, metadata in zip(documents, metadatas)
         )
+        
         return (
-            f"Context:\n{context}\n\nQuestion: {question}" # SYSTEM PROMPT
+            f"Context:\n{context}\n\nQuestion: {question}"
         )
 
     def generate(self, prompt: str) -> str:

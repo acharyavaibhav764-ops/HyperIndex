@@ -1,8 +1,8 @@
 from fastapi import APIRouter
-
 from schemas.health import HealthResponse
 
 router = APIRouter(tags=["Health"])
+
 
 # GET /health
 @router.get(
@@ -12,7 +12,5 @@ router = APIRouter(tags=["Health"])
     description="Liveness probe indicating the service is running.",
 )
 async def health_check() -> HealthResponse:
-    """Health check endpoint"""
-
     return HealthResponse(status="ok", version="1.0.0")
 

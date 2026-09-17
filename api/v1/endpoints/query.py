@@ -6,7 +6,8 @@ from schemas.query import QueryRequest, QueryResponse, SourceItem
 
 router = APIRouter(tags=["Query"])
 
-# POST api/v1/query
+
+# POST /api/v1/query
 @router.post(
     "/query",
     response_model=QueryResponse,
@@ -14,9 +15,6 @@ router = APIRouter(tags=["Query"])
     description="Retrieve relevant ChromaDB chunks and generate an answer using Ollama.",
 )
 async def query_pipeline(request: QueryRequest) -> QueryResponse:
-    """Extract question, retrieve relevant chunks and return answer"""
-
-    # Extract question from request body
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question must not be empty")

@@ -1,7 +1,5 @@
-from fastapi import APIRouter, File, HTTPException, UploadFile
-
-from api.dependencies import uploader
-from api.v1.endpoints.documents import index_document
+from fastapi import APIRouter, File, UploadFile
+from api.dependencies import chunker, embeddings, parser, retriever, uploader
 from api.v1.endpoints.query import query_pipeline
 from schemas import (
     FileIndexResponse,
@@ -21,9 +19,6 @@ legacy_router = APIRouter(tags=["Legacy (v0.1/v0.3)"])
     summary="[Legacy] Upload multiple files",
 )
 async def legacy_upload(files: list[UploadFile] = File(...)) -> FileUploadResponse:
-    if not files:
-        raise HTTPException(status_code=400, detail="At least one file is required")
-
     uploaded = uploader.upload_files(files)
     return FileUploadResponse(
         message="Files uploaded successfully",
@@ -46,13 +41,22 @@ async def legacy_upload(files: list[UploadFile] = File(...)) -> FileUploadRespon
     summary="[Legacy] Chunk and embed one uploaded file",
 )
 async def legacy_chunk_and_embed(file_id: str) -> FileIndexResponse:
-    res = await index_document(document_id=file_id)
+    content, filename = uploader.download_file(file_id)
+    pages = parser.parse(content, filename)
+    chunks, metadatas, chunk_ids = chunker.split(pages, file_id, filename)
+    vectors = embeddings.embed(chunks)
+    retriever.upsert(
+        ids=chunk_ids,
+        documents=chunks,
+        metadatas=metadatas,
+        embeddings=vectors,
+    )
     return FileIndexResponse(
-        file_id=res.document_id,
-        filename=res.filename,
-        collection=res.collection,
-        total_chunks=res.total_chunks,
-        indexed_chunks=res.indexed_chunks,
+        file_id=file_id,
+        filename=filename,
+        collection=retriever.collection_name,
+        total_chunks=len(chunks),
+        indexed_chunks=len(chunks),
     )
 
 

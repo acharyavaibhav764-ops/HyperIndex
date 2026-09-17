@@ -2,77 +2,72 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from api.dependencies import chunker, embeddings, parser, retriever, uploader
 from schemas.document import (
-    DocumentIndexResponse,
-    DocumentUploadItem,
-    DocumentUploadResponse,
+    DocumentIngestItem,
+    DocumentIngestResponse,
 )
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
-# POST /api/v1/documents
+
+# POST /api/v1/documents/
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
-    response_model=DocumentUploadResponse,
-    summary="Upload multiple documents",
+    response_model=DocumentIngestResponse,
+    summary="Upload and ingest documents",
     description=(
-        "Upload one or more documents to object storage. "
-        "In Swagger UI, choose a file and click the 'Add string item' button below it "
-        "to add more files before clicking Execute."
+        "Upload one or more documents, parse text, chunk, generate embeddings, "
+        "and index them in ChromaDB synchronously."
     ),
 )
-async def upload_documents(
+async def ingest_documents(
     files: list[UploadFile] = File(...),
-) -> DocumentUploadResponse:
-    """Takes a list of files to uploaded, upload to MinIO and return response"""
-    
+) -> DocumentIngestResponse:
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
+    # Upload files to MinIO
     uploaded_documents = uploader.upload_files(files)
 
-    return DocumentUploadResponse(
-        message="Documents uploaded successfully",
-        count=len(uploaded_documents),
-        documents=[
-            DocumentUploadItem(
-                document_id=item["document_id"],
-                filename=item["filename"],
-                size_bytes=item["size_bytes"],
+    ingested_items = []
+    for item in uploaded_documents:
+        doc_id = item["document_id"]
+        filename = item["filename"]
+        size_bytes = item["size_bytes"]
+
+        # Download and parse text pages
+        content, _ = uploader.download_file(doc_id)
+        pages = parser.parse(content, filename)
+
+        # Chunk text and attach metadata
+        chunks, metadatas, chunk_ids = chunker.split(pages, doc_id, filename)
+
+        # Generate vector embeddings
+        vectors = embeddings.embed(chunks)
+
+        # Persist to ChromaDB
+        retriever.upsert(
+            ids=chunk_ids,
+            documents=chunks,
+            metadatas=metadatas,
+            embeddings=vectors,
+        )
+
+        # Append to list of ingested items
+        ingested_items.append(
+            DocumentIngestItem(
+                document_id=doc_id,
+                filename=filename,
+                size_bytes=size_bytes,
+                collection=retriever.collection_name,
+                total_chunks=len(chunks),
+                status="indexed",
             )
-            for item in uploaded_documents
-        ],
-    )
+        )
 
-# POST api/v1/documents/{document_id}/index
-@router.post(
-    "/{document_id}/index",
-    response_model=DocumentIndexResponse,
-    summary="Parse, chunk, embed and index a document",
-    description="Download raw document from MinIO, split into chunks, generate embeddings, and persist in ChromaDB.",
-)
-async def index_document(document_id: str) -> DocumentIndexResponse:
-    """Download raw file from MinIO and index it in ChromaDB, finally return success response"""
-
-    # Download, parse, chunk and vectorize the file
-    content, filename = uploader.download_file(document_id)
-    pages = parser.parse(content, filename)
-    chunks, metadatas, chunk_ids = chunker.split(pages, document_id, filename)
-
-    vectors = embeddings.embed(chunks)
-    retriever.upsert(
-        ids=chunk_ids,
-        documents=chunks,
-        metadatas=metadatas,
-        embeddings=vectors,
-    )
-
-    # Return response
-    return DocumentIndexResponse(
-        document_id=document_id,
-        filename=filename,
-        collection=retriever.collection_name,
-        total_chunks=len(chunks),
-        indexed_chunks=len(chunks),
+    return DocumentIngestResponse(
+        message="Documents uploaded and indexed successfully",
+        count=len(ingested_items),
+        documents=ingested_items,
     )
 

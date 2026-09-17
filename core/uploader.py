@@ -110,16 +110,15 @@ class Uploader:
 
         return uploaded_files
 
-    def download_file(self, document_id: str) -> tuple[bytes, str]:
+    def download_file(self, file_id: str) -> tuple[bytes, str]:
         """Retrieve raw file bytes and original filename from MinIO."""
 
         try:
-            response = self.client.get_object(Bucket=self.bucket_name, Key=document_id)
+            response = self.client.get_object(Bucket=self.bucket_name, Key=file_id)
             content = response["Body"].read()
             response["Body"].close()
         except (ClientError, OSError) as error:
-            raise StorageError(f"Unable to download file {document_id}") from error
+            raise StorageError(f"Unable to download file {file_id}") from error
 
-        filename = response.get("Metadata", {}).get("filename", document_id)
+        filename = response.get("Metadata", {}).get("filename", file_id)
         return content, filename
-

@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycle."""
-    
     logger.info("Initializing application resources...")
     uploader.ensure_bucket()
     yield
@@ -33,9 +32,11 @@ app = FastAPI(title="Honeywell RAG", version="1.0.0", lifespan=lifespan)
 async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
+
 @app.exception_handler(StorageError)
 async def storage_error_handler(request: Request, exc: StorageError) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc)})
+
 
 @app.exception_handler(GenerationError)
 async def generation_error_handler(request: Request, exc: GenerationError) -> JSONResponse:
@@ -45,5 +46,5 @@ async def generation_error_handler(request: Request, exc: GenerationError) -> JS
 # Mount Modern Versioned API & Health Check
 app.include_router(api_router)
 
-# Mount Legacy Compatibility Routes (Dual-Run)
+# Mount Legacy Compatibility Routes
 app.include_router(legacy_router)

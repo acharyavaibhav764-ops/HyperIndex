@@ -1,2 +1,2 @@
-# API package
+"""API package for Honeywell RAG Assistant."""
 

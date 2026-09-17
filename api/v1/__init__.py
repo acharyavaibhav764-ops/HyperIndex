@@ -1,2 +1,2 @@
-# API v1 package
+"""API v1 package."""
 

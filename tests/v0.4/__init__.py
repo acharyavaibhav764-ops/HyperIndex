@@ -1,2 +1,2 @@
-# Tests for Version 0.4
+"""Version 0.4 test package."""
 

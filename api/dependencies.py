@@ -1,3 +1,4 @@
+from config import settings
 from core import (
     Chunker,
     Embeddings,
@@ -7,10 +8,15 @@ from core import (
     Uploader,
 )
 
+# Global shared singletons
 uploader = Uploader()
 parser = Parser()
-chunker = Chunker()
+chunker = Chunker(chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap)
 embeddings = Embeddings()
 retriever = Retriever(embeddings=embeddings)
-generator = Generator()
+generator = Generator(
+    ollama_host=settings.ollama_host,
+    ollama_port=settings.ollama_port,
+    model=settings.ollama_model,
+)
 
