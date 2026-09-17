@@ -101,6 +101,7 @@ class Uploader:
             logger.info("Upload successful | filename=%s | object_key=%s", filename, object_key)
             uploaded_files.append(
                 {
+                    "document_id": file_id,
                     "file_id": file_id,
                     "filename": filename,
                     "size_bytes": size,

@@ -52,6 +52,7 @@ class Chunker:
                 # Metadata
                 metadatas.append(
                     {
+                        "document_id": file_id,
                         "file_id": file_id,
                         "filename": filename,
                         "page": page_number,
