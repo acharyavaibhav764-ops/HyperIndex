@@ -4,7 +4,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from api.dependencies import uploader
-from api.legacy import legacy_router
 from api.v1.router import api_router
 from core import GenerationError, StorageError
 
@@ -43,8 +42,5 @@ async def generation_error_handler(request: Request, exc: GenerationError) -> JS
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-# Mount Modern Versioned API & Health Check
+# Mount Versioned Modern RESTful API & Health Probe
 app.include_router(api_router)
-
-# Mount Legacy Compatibility Routes
-app.include_router(legacy_router)
