@@ -28,5 +28,25 @@ class Settings:
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     retrieval_k: int = int(os.getenv("RETRIEVAL_K", "5"))
 
+    # Parsing Architecture — HybridChunker tokenizer
+    chunker_tokenizer: str = os.getenv(
+        "CHUNKER_TOKENIZER", "sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+    # Parsing Architecture v2 — local lightweight picture description (DOCX/PPTX)
+    # Primary preset: smolvlm (HuggingFaceTB/SmolVLM-256M-Instruct, ~256MB VRAM, runs in-process).
+    # Escalation preset: granite_vision (Granite-Vision-3.3-2B via Ollama).
+    # DeepSeek-OCR2 is NOT used here — it requires ≥8GB VRAM (GTX 1650 = 4GB).
+    # DeepSeek-OCR2 integration is planned for v5 (PDF branch) on production hardware.
+    # See parsing_architecture_plan.md for the v6 vLLM migration note.
+    picture_description_preset: str = os.getenv("PICTURE_DESCRIPTION_PRESET", "smolvlm")
+    picture_description_prompt: str = os.getenv(
+        "PICTURE_DESCRIPTION_PROMPT",
+        "Describe this image in 2-3 sentences. Be concise and accurate.",
+    )
+    enable_picture_description: bool = (
+        os.getenv("ENABLE_PICTURE_DESCRIPTION", "false").lower() == "true"
+    )
+
 
 settings = Settings()
