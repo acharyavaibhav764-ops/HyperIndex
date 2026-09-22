@@ -8,16 +8,18 @@ from config import settings
 
 class Chunker:
     """
-    Split extracted page text into overlapping chunks with metadata and unique IDs.
+    Split extracted page text and Docling documents into overlapping chunks with metadata and unique IDs.
 
     Attributes:
         chunk_size:    Maximum character length of a legacy text chunk.
         chunk_overlap: Character overlap between consecutive legacy chunks.
         separators:    Separator hierarchy for the legacy text splitter.
-        splitter:      :class:`RecursiveCharacterTextSplitter` for legacy path.
-    
+        splitter:      RecursiveCharacterTextSplitter for legacy path.
+
     Methods:
         split()
+        _split_legacy()
+        _split_docling()
     """
 
     def __init__(
@@ -100,13 +102,15 @@ class Chunker:
         
         from docling_core.types.doc import DocItemLabel
 
+        chunks: list[str] = []
+        metadatas: list[dict[str, Any]] = []
+        chunk_ids: list[str] = []
+
+        # Initialize hybrid chunker and create list of raw chunks made in single pass
         chunker = HybridChunker(tokenizer=settings.chunker_tokenizer)
         raw_chunks = list(chunker.chunk(doc))
 
-        chunks: list[str] = []
-        metadatas: list[dict[str, Any]] = []
-
-        # Create a list of expected headings
+        # Create a list of headings already covered by the chunker
         covered_headings: set[str] = set()
         for chunk in raw_chunks:
             try:
@@ -116,10 +120,16 @@ class Chunker:
                 pass
 
         for chunk in raw_chunks:
+
+            # Create a meaningful structure from nearby chunks
+            # Ex: A heading is placed before the body chunk so both are close by
             text = chunker.contextualize(chunk).strip()
             if len(text) < 5:  # Skip micro chunks
                 continue
 
+            # Append relevant metadata
+
+            # Attempt to extract page number
             page: int | None = None
             try:
                 prov = chunk.meta.doc_items[0].prov
@@ -128,6 +138,7 @@ class Chunker:
             except (AttributeError, IndexError, TypeError):
                 pass
 
+            # Identify whether its a picture
             is_picture_chunk = (
                 "[Figure description]" in text
                 or any(
@@ -136,7 +147,6 @@ class Chunker:
                 )
             )
 
-            # Metadata
             meta: dict[str, Any] = {
                 "document_id": file_id,
                 "file_id": file_id,
@@ -144,23 +154,34 @@ class Chunker:
                 "page": page,
                 "chunk_index": len(metadatas),
             }
+
             if is_picture_chunk:
                 meta["source"] = "image_description"
-
             metadatas.append(meta)
+
             chunks.append(text)
 
+        # Second pass over the raw chunks from chunker to handle heading only texts
         for item in doc.texts:
+
+            # If the title/section header label present, first chunker pass has accounted
             if item.label not in (DocItemLabel.TITLE, DocItemLabel.SECTION_HEADER):
                 continue
+
+            # Extract text from header
             heading_text = (item.text or "").strip()
             if heading_text and heading_text not in covered_headings:
+
+                # Append relevant metadata
+
+                # Page number
                 page: int | None = None
                 try:
                     if item.prov:
                         page = item.prov[0].page_no
                 except (AttributeError, IndexError, TypeError):
                     pass
+
                 metadatas.append(
                     {
                         "document_id": file_id,
@@ -170,6 +191,7 @@ class Chunker:
                         "chunk_index": len(metadatas),
                     }
                 )
+
                 chunks.append(heading_text)
 
         if not chunks:

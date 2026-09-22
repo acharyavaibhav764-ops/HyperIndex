@@ -112,7 +112,19 @@ def _inject_picture_descriptions(doc: DoclingDocument) -> None:
 
 
 class DoclingParser(BaseParser):
-    """Parse Microsoft Office documents (Word and PowerPoint) into a DoclingDocument`."""
+    """
+    Parse Microsoft Office documents (Word and PowerPoint) into a DoclingDocument.
+    
+    Attributes:
+        _converter: DocumentConverter class from docling for text purely
+        _converter_vlm: DocumentConverter class which also supports image descriptions with VLM
+
+    Methods:
+        can_handle()
+        parse()
+
+        _convert_with_vlm()
+    """
 
     SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".docx", ".pptx"})
 
