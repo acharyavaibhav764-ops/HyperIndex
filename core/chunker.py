@@ -130,13 +130,16 @@ class Chunker:
             # Append relevant metadata
 
             # Attempt to extract page number
-            page: int | None = None
-            try:
-                prov = chunk.meta.doc_items[0].prov
-                if prov:
-                    page = prov[0].page_no
-            except (AttributeError, IndexError, TypeError):
-                pass
+            pages = sorted(
+                list(
+                    set(
+                        item.prov[0].page_no
+                        for item in getattr(chunk.meta, "doc_items", [])
+                        if getattr(item, "prov", None)
+                    )
+                )
+            )
+            page: int | None = pages[0] if pages else None # Handle data split across pages by assigning starting page to chunk
 
             # Identify whether its a picture
             is_picture_chunk = (
@@ -152,6 +155,7 @@ class Chunker:
                 "file_id": file_id,
                 "filename": filename,
                 "page": page,
+                "page_numbers": pages,
                 "chunk_index": len(metadatas),
             }
 
@@ -188,6 +192,7 @@ class Chunker:
                         "file_id": file_id,
                         "filename": filename,
                         "page": page,
+                        "page_numbers": [page] if page is not None else [],
                         "chunk_index": len(metadatas),
                     }
                 )

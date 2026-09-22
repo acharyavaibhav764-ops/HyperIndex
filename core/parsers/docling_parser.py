@@ -6,7 +6,7 @@ from docling.document_converter import (
     WordFormatOption,
     PowerpointFormatOption,
 )
-from docling_core.types.doc import DocItemLabel, DoclingDocument
+from docling_core.types.doc import DocItemLabel, DoclingDocument, SectionHeaderItem
 from docling_core.types.io import DocumentStream
 
 from config import settings
@@ -111,6 +111,34 @@ def _inject_picture_descriptions(doc: DoclingDocument) -> None:
             )
 
 
+def _promote_pptx_pseudo_headings(doc: DoclingDocument) -> None:
+    """Promote plain text headings to actual headings by changing label in DoclingDocument."""
+
+    # Find the first item of a DoclingDocument in each page
+    page_first_items = {}
+    for item in doc.texts:
+        if getattr(item, "prov", None):
+            p_no = item.prov[0].page_no
+            if p_no not in page_first_items:
+                page_first_items[p_no] = item
+
+
+    for i, item in enumerate(doc.texts):
+        p_no = item.prov[0].page_no if getattr(item, "prov", None) else None
+
+        # For every text in doc, check if it is the first item of the page
+        if p_no and page_first_items.get(p_no) is item:
+            if item.label == DocItemLabel.PARAGRAPH:
+                text = getattr(item, "text", "").strip()
+
+                # If there is sub 100 character text, labelled as paragraph and not terminating with "." promote it to section header
+                if text and len(text) < 100 and not text.endswith("."):
+                    dump = item.model_dump()
+                    dump["label"] = DocItemLabel.SECTION_HEADER
+                    new_item = SectionHeaderItem(**dump)
+                    doc.texts[i] = new_item
+
+
 class DoclingParser(BaseParser):
     """
     Parse Microsoft Office documents (Word and PowerPoint) into a DoclingDocument.
@@ -153,6 +181,10 @@ class DoclingParser(BaseParser):
         else:
             result = self._converter.convert(stream)
             doc = result.document
+
+        # Handle plain text headings in the DoclingDocument
+        if filename.lower().endswith(".pptx"):
+            _promote_pptx_pseudo_headings(doc)
 
         return doc
 

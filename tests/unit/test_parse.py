@@ -18,7 +18,8 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
 
     if len(sys.argv) < 2:
-        print("Usage: python test_parse.py <path-to-file.txt or .md>")
+        print("Usage: python test_parse.py <path-to-file>")
+        print("Supported: .txt  .md  .docx  .pptx")
         sys.exit(1)
 
     file_path = Path(sys.argv[1])
@@ -52,13 +53,14 @@ def main():
         print(f"      Chunking failed: {e}")
         sys.exit(1)
 
-    print(f"\n[Result] Successfully produced {len(chunks)} chunk(s):\n")
+    total = len(chunks)
+    print(f"\n[Result] Successfully produced {total} chunk(s):\n")
     for i, (chunk, meta, cid) in enumerate(zip(chunks, metadatas, chunk_ids)):
         print(f"{'='*70}")
-        print(f"Chunk #{i + 1} | ID: {cid} | Length: {len(chunk)} chars")
+        print(f"Chunk #{i + 1}/{total} | ID: {cid} | Length: {len(chunk)} chars")
         print(f"Metadata: {meta}")
         print(f"{'-'*70}")
-        preview = chunk if len(chunk) <= 300 else chunk[:300] + "... [truncated]"
+        preview = chunk if len(chunk) <= 800 else chunk[:800] + f"\n... [truncated — full length: {len(chunk)} chars]"
         print(preview)
         print(f"{'='*70}\n")
 
