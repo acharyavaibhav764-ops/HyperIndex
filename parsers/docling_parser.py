@@ -228,13 +228,12 @@ class DoclingParser(BaseParser):
     def __init__(self) -> None:
         """Instantiate shared DocumentConverter(s) for Office formats.
 
-        Two converters are created lazily:
-        - ``_converter``: plain text/table extraction, always available.
+        Both converters are created lazily on first use:
+        - ``_converter``: plain text/table extraction.
         - ``_converter_vlm``: text + picture description via local VLM,
-          built only when first needed and only when
-          ``settings.enable_picture_description`` is True.
+          built only when ``settings.enable_picture_description`` is True.
         """
-        self._converter = DocumentConverter()
+        self._converter: DocumentConverter | None = None
         self._converter_vlm: DocumentConverter | None = None
 
     # ------------------------------------------------------------------
@@ -276,6 +275,8 @@ class DoclingParser(BaseParser):
         if settings.enable_picture_description:
             doc = self._convert_with_vlm(stream, filename)
         else:
+            if self._converter is None:
+                self._converter = DocumentConverter()
             result = self._converter.convert(stream)
             doc = result.document
 
@@ -317,6 +318,8 @@ class DoclingParser(BaseParser):
                     filename,
                     exc,
                 )
+                if self._converter is None:
+                    self._converter = DocumentConverter()
                 result = self._converter.convert(stream)
                 return result.document
 
@@ -336,5 +339,7 @@ class DoclingParser(BaseParser):
             fallback_stream = DocumentStream(
                 name=filename, stream=io.BytesIO(stream.stream.getvalue())
             )
+            if self._converter is None:
+                self._converter = DocumentConverter()
             result = self._converter.convert(fallback_stream)
             return result.document
