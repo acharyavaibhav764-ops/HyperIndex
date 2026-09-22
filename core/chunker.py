@@ -192,14 +192,17 @@ class Chunker:
             if len(text) < 5:  # Skip micro chunks
                 continue
 
-            # Attempt to extract page number from Docling provenance
-            page: int | None = None
-            try:
-                prov = chunk.meta.doc_items[0].prov
-                if prov:
-                    page = prov[0].page_no
-            except (AttributeError, IndexError, TypeError):
-                pass
+            # Extract all unique page numbers from Docling provenance
+            pages = sorted(
+                list(
+                    set(
+                        item.prov[0].page_no
+                        for item in getattr(chunk.meta, "doc_items", [])
+                        if getattr(item, "prov", None)
+                    )
+                )
+            )
+            page: int | None = pages[0] if pages else None
 
             is_picture_chunk = (
                 "[Figure description]" in text
@@ -214,6 +217,7 @@ class Chunker:
                 "file_id": file_id,
                 "filename": filename,
                 "page": page,
+                "page_numbers": pages,
                 "chunk_index": len(metadatas),
             }
             if is_picture_chunk:
@@ -243,6 +247,7 @@ class Chunker:
                         "file_id": file_id,
                         "filename": filename,
                         "page": page,
+                        "page_numbers": [page] if page is not None else [],
                         "chunk_index": len(metadatas),
                     }
                 )

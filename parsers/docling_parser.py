@@ -47,7 +47,7 @@ from docling.document_converter import (
     WordFormatOption,
     PowerpointFormatOption,
 )
-from docling_core.types.doc import DocItemLabel, DoclingDocument
+from docling_core.types.doc import DocItemLabel, DoclingDocument, SectionHeaderItem
 from docling_core.types.io import DocumentStream
 
 from config import settings
@@ -172,6 +172,33 @@ def _inject_picture_descriptions(doc: DoclingDocument) -> None:
             )
 
 
+def _promote_pptx_pseudo_headings(doc: DoclingDocument) -> None:
+    """Identify and promote plain text pseudo-headings on PPTX slides.
+    
+    Docling's MsPowerpointDocumentBackend often misclassifies text box titles as
+    PARAGRAPH. If a PARAGRAPH is short (<100 chars), does not end in a period,
+    and is the first textual item on its page, we safely replace the TextItem
+    node with a SectionHeaderItem so HybridChunker respects it as a hard boundary.
+    """
+    page_first_items = {}
+    for item in doc.texts:
+        if getattr(item, "prov", None):
+            p_no = item.prov[0].page_no
+            if p_no not in page_first_items:
+                page_first_items[p_no] = item
+                
+    for i, item in enumerate(doc.texts):
+        p_no = item.prov[0].page_no if getattr(item, "prov", None) else None
+        if p_no and page_first_items.get(p_no) is item:
+            if item.label == DocItemLabel.PARAGRAPH:
+                text = getattr(item, "text", "").strip()
+                if text and len(text) < 100 and not text.endswith("."):
+                    dump = item.model_dump()
+                    dump["label"] = DocItemLabel.SECTION_HEADER
+                    new_item = SectionHeaderItem(**dump)
+                    doc.texts[i] = new_item
+
+
 class DoclingParser(BaseParser):
     """
     Parse Microsoft Office documents (Word and PowerPoint) into a
@@ -251,6 +278,9 @@ class DoclingParser(BaseParser):
         else:
             result = self._converter.convert(stream)
             doc = result.document
+
+        if filename.lower().endswith(".pptx"):
+            _promote_pptx_pseudo_headings(doc)
 
         return doc
 
