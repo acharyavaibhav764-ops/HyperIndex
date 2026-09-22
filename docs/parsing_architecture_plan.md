@@ -39,7 +39,7 @@ gitGraph
 |---|---|---|---|
 | **v1** | `v1.md` | `BaseParser` abstract, `TextParser` (TXT/MD via `convert_string`), `ParserRouter` scaffold, `HybridChunker` in `Chunker` | Internal only — ingestion endpoint unchanged |
 | **v2** | `v2.md` | `DoclingParser` for `.docx` + `.pptx`, router updated; `HybridChunker.serialize()` critical fix; lightweight local picture description (SmolVLM-256M / Granite-Vision via Ollama) | Internal only |
-| **v3** | `parsing_arch_v3_legacy.md` | `LibreOfficeConverter` for `.doc`/`.ppt`, router updated | Internal only |
+| **v3** | `v3.md` | `LibreOfficeConverter` for `.doc`/`.ppt`, router updated | Internal only |
 | **v4** | `parsing_arch_v4_pdf_stub.md` | `PdfStubParser` for `.pdf`, router covers all formats → **ingestion endpoint switched to `parser_router`** | **Branch merge to main** |
 | **v5** | `parsing_arch_v5_pdf_deep.md` | `PdfPageRouter` (per-page triage, PyMuPDF4LLM, Docling, DeepSeek-OCR2) | Separate branch off main post-merge |
 | **v6** | `parsing_arch_v6_vllm_migration.md` | Migrate DeepSeek-OCR2 serving from HF Transformers (v5) to vLLM for production batch throughput on PDF per-page OCR/VLM tier | Continuation off v5, after v5 is functional. **v6 is a planned future version only — not executable on current dev hardware (GTX 1650, 4GB VRAM). Full planning deferred until v5 is near-complete.** |

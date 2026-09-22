@@ -4,6 +4,7 @@ from docling_core.types.doc import DoclingDocument
 
 from .base import BaseParser
 from .docling_parser import DoclingParser
+from .libreoffice_converter import LibreOfficeConverter
 from .text import TextParser
 
 
@@ -32,12 +33,15 @@ class ParserRouter:
 
         v1: TextParser for .txt / .md
         v2: DoclingParser for .docx / .pptx
+        v3: LibreOfficeConverter for .doc / .ppt
         """
         self._parsers: list[BaseParser] = []
         # v1: register TextParser for .txt / .md
         self.register(TextParser())
         # v2: register DoclingParser for .docx / .pptx
         self.register(DoclingParser())
+        # v3: register LibreOfficeConverter for .doc / .ppt
+        self.register(LibreOfficeConverter())
 
     # ------------------------------------------------------------------
     # Public API

@@ -48,5 +48,9 @@ class Settings:
         os.getenv("ENABLE_PICTURE_DESCRIPTION", "false").lower() == "true"
     )
 
+    # Parsing Architecture v3 — LibreOffice headless converter (.doc / .ppt)
+    libreoffice_binary: str = os.getenv("LIBREOFFICE_BINARY", "")
+    libreoffice_timeout_seconds: int = int(os.getenv("LIBREOFFICE_TIMEOUT_SECONDS", "60"))
+
 
 settings = Settings()

@@ -51,10 +51,12 @@ class TestParserRouterGetParser:
         with pytest.raises(UnsupportedFileError):
             router.get_parser("file.pdf")
 
-    def test_doc_legacy_unsupported_in_v2(self, router):
-        """Legacy .doc requires LibreOffice (v3) — must raise UnsupportedFileError."""
-        with pytest.raises(UnsupportedFileError):
-            router.get_parser("file.doc")
+    def test_doc_routes_to_libreoffice_converter(self, router):
+        """v3: .doc now supported via LibreOfficeConverter — must NOT raise."""
+        from parsers.libreoffice_converter import LibreOfficeConverter
+        parser = router.get_parser("file.doc")
+        assert isinstance(parser, LibreOfficeConverter)
+
 
     # v2 additions
     def test_docx_routes_to_docling_parser(self, router):

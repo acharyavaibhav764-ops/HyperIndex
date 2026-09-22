@@ -18,7 +18,7 @@ def main():
 
     if len(sys.argv) < 2:
         print("Usage: python test_parse.py <path-to-file>")
-        print("Supported: .txt  .md  .docx  .pptx")
+        print("Supported: .txt  .md  .docx  .pptx  .doc  .ppt")
         sys.exit(1)
 
     file_path = Path(sys.argv[1])
