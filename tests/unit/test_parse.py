@@ -8,8 +8,9 @@ Usage:
 import sys
 from pathlib import Path
 
-from parsers import ParserRouter
+from core.parsers import ParserRouter
 from core import Chunker
+
 
 
 def main():

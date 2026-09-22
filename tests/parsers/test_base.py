@@ -1,5 +1,5 @@
 """
-Phase 1 tests — BaseParser abstract interface.
+Unit tests — BaseParser abstract interface.
 
 Verifies:
 - BaseParser cannot be instantiated directly.
@@ -7,9 +7,9 @@ Verifies:
 - Valid concrete subclass can be instantiated and called.
 """
 import pytest
-
-from parsers.base import BaseParser
 from docling_core.types.doc import DoclingDocument
+
+from core.parsers.base import BaseParser
 
 
 class _NoMethods(BaseParser):
@@ -50,3 +50,4 @@ class TestBaseParserAbstract:
         parser = _ValidParser()
         assert parser.can_handle(".dummy") is True
         assert parser.can_handle(".pdf") is False
+

@@ -1,5 +1,5 @@
 """
-Phase 2 tests — TextParser implementation.
+Unit tests — TextParser implementation.
 
 Verifies:
 - Plain-text files are parsed and produce a non-empty DoclingDocument.
@@ -9,9 +9,9 @@ Verifies:
 - can_handle returns True for supported extensions only.
 """
 import pytest
-
 from docling_core.types.doc import DoclingDocument
-from parsers.text import TextParser
+
+from core.parsers.text import TextParser
 
 
 @pytest.fixture(scope="module")
@@ -75,3 +75,4 @@ class TestTextParserParse:
         """An empty byte string must not raise and must return a DoclingDocument."""
         doc = parser.parse(b"", "empty.txt")
         assert isinstance(doc, DoclingDocument)
+

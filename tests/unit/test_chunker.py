@@ -25,8 +25,9 @@ def _make_pages(text: str = "The quick brown fox. " * 50) -> list[tuple[int, str
 
 def _make_docling_doc(text: str = "The quick brown fox. " * 50):
     """Build a minimal DoclingDocument from text via TextParser."""
-    from parsers.text import TextParser
+    from core.parsers.text import TextParser
     return TextParser().parse(text.encode(), "sample.txt")
+
 
 
 FILE_ID = "test-file-001"

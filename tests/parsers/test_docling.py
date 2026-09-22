@@ -1,5 +1,5 @@
 """
-Phase 1 tests — DoclingParser for .docx and .pptx.
+Unit tests — DoclingParser for .docx and .pptx.
 
 Verifies:
 - In-memory .docx parsing preserves headings, paragraphs, and tables.
@@ -11,13 +11,10 @@ import io
 
 import docx
 import pytest
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
 from pptx import Presentation
-from pptx.util import Inches
 
 from docling_core.types.doc import DoclingDocument
-from parsers.docling_parser import DoclingParser
+from core.parsers.docling_parser import DoclingParser
 
 
 @pytest.fixture(scope="module")
@@ -135,3 +132,4 @@ class TestDoclingParserPptx:
         doc = parser.parse(_make_pptx_bytes(), "report.pptx")
         exported = doc.export_to_markdown()
         assert "sensor anomaly" in exported
+

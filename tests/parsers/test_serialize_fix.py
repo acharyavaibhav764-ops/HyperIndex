@@ -1,5 +1,5 @@
 """
-tests/parsing_arch/v2/test_serialize_fix.py
+tests/parsers/test_serialize_fix.py
 
 Regression tests for the v2 HybridChunker contextualize() fix.
 
@@ -11,21 +11,18 @@ Gap A — chunk.text (body only) silently drops section/slide titles.
          chunk output.
 
 Gap B — Slides with a title and no body produce zero raw chunks from
-         HybridChunker.  The chunker therefore drops them entirely, even
-         after Gap A is fixed.  Fixed by walking doc.texts post-chunking
+         HybridChunker. The chunker therefore drops them entirely, even
+         after Gap A is fixed. Fixed by walking doc.texts post-chunking
          and injecting synthetic chunks for uncovered TITLE/SECTION_HEADER
-         items.  These tests assert that heading-only slides produce ≥1 chunk.
+         items. These tests assert that heading-only slides produce ≥1 chunk.
 """
 import io
-import sys
-
+import docx as _docx
 import pytest
 from pptx import Presentation
-import docx as _docx
-
-from docling_core.types.doc import DoclingDocument
 from docling.document_converter import DocumentConverter
 from docling_core.types.io import DocumentStream
+
 from core.chunker import Chunker
 
 
@@ -114,10 +111,8 @@ class TestGapA_TitlesInChunkText:
         chunks, _, _ = _parse_and_chunk(
             _make_pptx_with_heading_only_slide(), "slides.pptx", "file-ga03"
         )
-        # Find the chunk containing the Architecture slide body
         arch_chunks = [c for c in chunks if "Upload" in c or "Parse" in c]
         assert arch_chunks, "Expected at least one chunk from the Architecture slide body."
-        # The title should be in the same chunk, not stripped out
         assert any("Architecture Overview" in c for c in arch_chunks), (
             "Slide title should be in the same chunk as its body text."
         )
@@ -170,3 +165,4 @@ class TestGapB_HeadingOnlySlides:
                 f"chunk_index must be sequential; index {i} has chunk_index={meta['chunk_index']}"
             )
         assert chunk_ids[0] == "file-gb04_c0"
+

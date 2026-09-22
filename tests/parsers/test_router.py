@@ -1,18 +1,25 @@
 """
-Phase 3 tests — ParserRouter dispatcher.
+Unit tests — ParserRouter dispatcher.
 
 Verifies:
 - .txt and .md route to TextParser.
-- Case-insensitivity (.TXT, .MD).
+- .docx and .pptx route to DoclingParser.
+- Case-insensitivity (.TXT, .MD, .DOCX, .PPTX).
 - UnsupportedFileError raised for unknown extensions.
 - Full parse() call through router returns a DoclingDocument.
 - register() allows adding a custom parser dynamically.
 """
-import pytest
+import io
 
+import docx as _docx
+import pytest
 from docling_core.types.doc import DoclingDocument
-from parsers.router import ParserRouter, UnsupportedFileError
-from parsers.text import TextParser
+from pptx import Presentation
+
+from core.parsers.base import BaseParser
+from core.parsers.docling_parser import DoclingParser
+from core.parsers.router import ParserRouter, UnsupportedFileError
+from core.parsers.text import TextParser
 
 
 @pytest.fixture()
@@ -46,33 +53,28 @@ class TestParserRouterGetParser:
         with pytest.raises(UnsupportedFileError):
             router.get_parser("report.xyz")
 
-    def test_pdf_unsupported_in_v2(self, router):
+    def test_pdf_unsupported(self, router):
         """PDF is not yet supported in v2 — must raise UnsupportedFileError."""
         with pytest.raises(UnsupportedFileError):
             router.get_parser("file.pdf")
 
-    def test_doc_legacy_unsupported_in_v2(self, router):
+    def test_doc_legacy_unsupported(self, router):
         """Legacy .doc requires LibreOffice (v3) — must raise UnsupportedFileError."""
         with pytest.raises(UnsupportedFileError):
             router.get_parser("file.doc")
 
-    # v2 additions
     def test_docx_routes_to_docling_parser(self, router):
-        from parsers.docling_parser import DoclingParser
         parser = router.get_parser("report.docx")
         assert isinstance(parser, DoclingParser)
 
     def test_pptx_routes_to_docling_parser(self, router):
-        from parsers.docling_parser import DoclingParser
         parser = router.get_parser("slides.pptx")
         assert isinstance(parser, DoclingParser)
 
     def test_case_insensitive_docx(self, router):
-        from parsers.docling_parser import DoclingParser
         assert isinstance(router.get_parser("FILE.DOCX"), DoclingParser)
 
     def test_case_insensitive_pptx(self, router):
-        from parsers.docling_parser import DoclingParser
         assert isinstance(router.get_parser("SLIDES.PPTX"), DoclingParser)
 
 
@@ -89,10 +91,7 @@ class TestParserRouterParse:
         with pytest.raises(UnsupportedFileError):
             router.parse(b"%PDF-1.4", "file.pdf")
 
-    # v2 additions
     def test_parse_docx_returns_document(self, router):
-        import io
-        import docx as _docx
         doc_obj = _docx.Document()
         doc_obj.add_heading("Test", level=1)
         doc_obj.add_paragraph("Hello from docx.")
@@ -102,8 +101,6 @@ class TestParserRouterParse:
         assert isinstance(doc, DoclingDocument)
 
     def test_parse_pptx_returns_document(self, router):
-        import io
-        from pptx import Presentation
         prs = Presentation()
         slide = prs.slides.add_slide(prs.slide_layouts[0])
         slide.shapes.title.text = "Test Slide"
@@ -117,8 +114,6 @@ class TestParserRouterParse:
 class TestParserRouterRegister:
     def test_register_custom_parser(self):
         """A dynamically registered parser should be discoverable."""
-        from parsers.base import BaseParser
-
         class DummyParser(BaseParser):
             SUPPORTED_EXTENSIONS = frozenset({".dummy"})
 
@@ -132,3 +127,4 @@ class TestParserRouterRegister:
         router.register(DummyParser())
         parser = router.get_parser("test.dummy")
         assert isinstance(parser, DummyParser)
+

@@ -1,31 +1,34 @@
-from .chunker import Chunker
-from .parser import Parser
-from parsers import ParserRouter, DoclingParser
+from .uploader import StorageError, Uploader
 
-# Heavy infrastructure imports (boto3, chromadb, httpx) are deferred to avoid
-# import failures in test environments that only have the parsing dependencies.
-try:
-    from .embeddings import Embeddings
-    from .generator import GenerationError, Generator
-    from .retriever import Retriever
-    from .uploader import StorageError, Uploader
-except ImportError:
-    Embeddings = None  # type: ignore[assignment,misc]
-    GenerationError = None  # type: ignore[assignment,misc]
-    Generator = None  # type: ignore[assignment,misc]
-    Retriever = None  # type: ignore[assignment,misc]
-    StorageError = None  # type: ignore[assignment,misc]
-    Uploader = None  # type: ignore[assignment,misc]
+from .parser import Parser
+from .parsers import (
+    BaseParser,
+    ParserRouter,
+    UnsupportedFileError,
+    TextParser,
+    DoclingParser,
+)
+
+from .chunker import Chunker
+from .embeddings import Embeddings
+from .generator import GenerationError, Generator
+from .retriever import Retriever
 
 __all__ = [
-    "Chunker",
-    "DoclingParser",
-    "Embeddings",
-    "GenerationError",
-    "Generator",
-    "Parser",
-    "ParserRouter",
-    "Retriever",
-    "StorageError",
     "Uploader",
+    "StorageError",
+
+    "Parser",
+    "BaseParser",
+    "ParserRouter",
+    "UnsupportedFileError",
+    "TextParser",
+    "DoclingParser",
+
+    "Chunker",
+    "Embeddings",
+    "Retriever",
+    "Generator",
+    "GenerationError",
 ]
+

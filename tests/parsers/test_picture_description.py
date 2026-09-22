@@ -1,5 +1,5 @@
 """
-tests/parsing_arch/v2/test_picture_description.py
+tests/parsers/test_picture_description.py
 
 Tests for the v2 picture description feature.
 
@@ -12,23 +12,23 @@ These tests cover:
 
 Note: the VLM tests are marked with @pytest.mark.slow and skipped by default
 (they require the SmolVLM model download on first run ~500MB and GPU/CPU time).
-Run explicitly with: py -m pytest tests/parsing_arch/v2/test_picture_description.py -v -m slow
+Run explicitly with: pytest tests/parsers/test_picture_description.py -v -m slow
 """
 import io
 import os
 import struct
 import zlib
 
-import pytest
 import docx as _docx
+import pytest
+from docling.document_converter import DocumentConverter
+from docling_core.types.doc import DoclingDocument
+from docling_core.types.io import DocumentStream
 from pptx import Presentation
 from pptx.util import Inches
 
-from docling_core.types.doc import DoclingDocument
-from docling.document_converter import DocumentConverter
-from docling_core.types.io import DocumentStream
-from parsers.docling_parser import DoclingParser
 from core.chunker import Chunker
+from core.parsers.docling_parser import DoclingParser
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,6 @@ class TestPictureDescriptionDisabled:
 
     def test_docx_no_figure_description_chunks_by_default(self, monkeypatch):
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "false")
-        # Re-import settings so the env var takes effect for this test
         import importlib, config as cfg
         importlib.reload(cfg)
         from config import settings as s
@@ -137,12 +136,12 @@ class TestPictureDescriptionDisabled:
 # ---------------------------------------------------------------------------
 
 class TestPictureDescriptionInjection:
-    """Verify special token stripping (Task 8) and failure logging (Task 9)."""
+    """Verify special token stripping and failure logging."""
 
     def test_strip_special_tokens_from_annotation(self):
-        """Task 8: Special tokens like <end_of_utterance> must be stripped."""
+        """Special tokens like <end_of_utterance> must be stripped."""
         from docling_core.types.doc import PictureDescriptionData
-        from parsers.docling_parser import _inject_picture_descriptions
+        from core.parsers.docling_parser import _inject_picture_descriptions
 
         doc = DoclingDocument(name="token_test")
         pic = doc.add_picture(parent=None)
@@ -168,9 +167,9 @@ class TestPictureDescriptionInjection:
         assert metadatas[0]["source"] == "image_description"
 
     def test_strip_truncated_special_tokens(self):
-        """Task 11: Truncated/mid-cut tokens like <end_of_utteranc must be stripped."""
+        """Truncated/mid-cut tokens like <end_of_utteranc must be stripped."""
         from docling_core.types.doc import PictureDescriptionData
-        from parsers.docling_parser import _inject_picture_descriptions
+        from core.parsers.docling_parser import _inject_picture_descriptions
 
         doc = DoclingDocument(name="truncated_token_test")
         pic = doc.add_picture(parent=None)
@@ -192,11 +191,11 @@ class TestPictureDescriptionInjection:
         assert metadatas[0]["source"] == "image_description"
 
     def test_picture_description_failure_does_not_leak_into_chunks(self, caplog):
-        """Task 9: Failed injection logs warning with self_ref without leaking into chunks."""
+        """Failed injection logs warning with self_ref without leaking into chunks."""
         import logging
         from unittest.mock import patch
         from docling_core.types.doc import PictureDescriptionData
-        from parsers.docling_parser import _inject_picture_descriptions
+        from core.parsers.docling_parser import _inject_picture_descriptions
 
         doc = DoclingDocument(name="failure_test")
         pic = doc.add_picture(parent=None)
@@ -221,7 +220,6 @@ class TestPictureDescriptionInjection:
         assert len(doc.texts) == 0
 
 
-
 # ---------------------------------------------------------------------------
 # VLM-enabled behaviour (ENABLE_PICTURE_DESCRIPTION=true)
 # Marked @pytest.mark.slow — skipped by default, run explicitly.
@@ -243,11 +241,7 @@ class TestPictureDescriptionEnabled:
         chunker = Chunker()
         chunks, metadatas, _ = chunker.split(doc, "file-pde01", "test.docx")
         figure_chunks = [c for c in chunks if "[Figure description]" in c]
-        assert len(figure_chunks) >= 1, (
-            "Expected ≥1 [Figure description] chunk when ENABLE_PICTURE_DESCRIPTION=true. "
-            "If this fails: (a) check if LibreOffice is required for image extraction, "
-            "(b) check if the VLM produced a non-empty description."
-        )
+        assert len(figure_chunks) >= 1
 
     def test_pptx_figure_description_chunk_present(self, monkeypatch):
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "true")
@@ -259,12 +253,9 @@ class TestPictureDescriptionEnabled:
         chunker = Chunker()
         chunks, _, _ = chunker.split(doc, "file-pde02", "test.pptx")
         figure_chunks = [c for c in chunks if "[Figure description]" in c]
-        assert len(figure_chunks) >= 1, (
-            "Expected ≥1 [Figure description] chunk when ENABLE_PICTURE_DESCRIPTION=true."
-        )
+        assert len(figure_chunks) >= 1
 
     def test_figure_description_metadata_present(self, monkeypatch):
-        """figure description chunks must have file_id and filename metadata."""
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "true")
         import importlib, config as cfg
         importlib.reload(cfg)
@@ -278,3 +269,4 @@ class TestPictureDescriptionEnabled:
             assert meta["file_id"] == "file-pde03"
             assert meta["filename"] == "test.docx"
             assert "chunk_index" in meta
+
