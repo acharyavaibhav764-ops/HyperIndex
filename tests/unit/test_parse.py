@@ -1,16 +1,22 @@
 """
-Quick CLI utility to test parsing and hybrid chunking on any text or Markdown file.
+Quick CLI utility to test parsing and hybrid chunking on any supported document (.txt, .md, .docx, .pptx).
 
 Usage:
-    python test_parse.py path/to/document.txt
-    python test_parse.py path/to/document.md
+    python tests/unit/test_parse.py path/to/document.txt
+    python tests/unit/test_parse.py path/to/document.md
+    python tests/unit/test_parse.py path/to/document.docx
+    python tests/unit/test_parse.py path/to/document.pptx
 """
 import sys
 from pathlib import Path
 
-from core.parsers import ParserRouter
-from core import Chunker
+# Ensure project root is in sys.path for direct script execution
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.parsers.router import ParserRouter
+from core.chunker import Chunker
 
 
 def main():
@@ -18,7 +24,7 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
 
     if len(sys.argv) < 2:
-        print("Usage: python test_parse.py <path-to-file>")
+        print("Usage: python tests/unit/test_parse.py <path-to-file>")
         print("Supported: .txt  .md  .docx  .pptx")
         sys.exit(1)
 

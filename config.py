@@ -28,7 +28,7 @@ class Settings:
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     retrieval_k: int = int(os.getenv("RETRIEVAL_K", "5"))
 
-    # Embedding model/Tokenizer
+    # Tokenizer
     chunker_tokenizer: str = os.getenv(
         "CHUNKER_TOKENIZER", "sentence-transformers/all-MiniLM-L6-v2"
     )
