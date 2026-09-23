@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from api.dependencies import uploader
+from api.deps import get_uploader
 from api.v1.router import api_router
 from core import GenerationError, StorageError
 
@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycle."""
+    
     logger.info("Initializing application resources...")
-    uploader.ensure_bucket()
+    get_uploader().ensure_bucket()
     yield
     logger.info("Shutting down application resources...")
 
