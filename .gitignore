@@ -1,6 +1,17 @@
+# Virtual Environment
+venv/
 .venv/
+
+# Python Bytecode & Test Caches
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# Environment Variables
 .env
+
+# Local Vector Database Data
 chroma_data/
-venv/
+
+# Editor Settings
+.vscode/
