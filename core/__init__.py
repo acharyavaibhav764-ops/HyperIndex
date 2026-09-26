@@ -7,6 +7,9 @@ from .parsers import (
     UnsupportedFileError,
     TextParser,
     DoclingParser,
+    LibreOfficeConverter,
+    LibreOfficeNotFoundError,
+    LibreOfficeConversionError,
 )
 
 from .chunker import Chunker
@@ -24,6 +27,9 @@ __all__ = [
     "UnsupportedFileError",
     "TextParser",
     "DoclingParser",
+    "LibreOfficeConverter",
+    "LibreOfficeNotFoundError",
+    "LibreOfficeConversionError",
 
     "Chunker",
     "Embeddings",
