@@ -1,6 +1,6 @@
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
-from api.dependencies import chunker, embeddings, parser, retriever, uploader
+from api.dependencies import chunker, embeddings, parser_router, retriever, uploader
 from schemas.document import (
     DocumentIngestItem,
     DocumentIngestResponse,
@@ -35,12 +35,20 @@ async def ingest_documents(
         filename = item["filename"]
         size_bytes = item["size_bytes"]
 
-        # Download and parse text pages
+        # Download and parse text pages using the new parser router
         content, _ = uploader.download_file(doc_id)
-        pages = parser.parse(content, filename)
+        docling_doc = parser_router.parse(content, filename=filename)
 
-        # Chunk text and attach metadata
-        chunks, metadatas, chunk_ids = chunker.split(pages, doc_id, filename)
+        # Chunk text and attach metadata using HybridChunker (or legacy chunker)
+        chunk_result = chunker.split(docling_doc, doc_id, filename)
+        
+        # Handle both the new list[TextChunk] and the legacy tuple format in case HybridChunker is not fully implemented
+        if isinstance(chunk_result, tuple) and len(chunk_result) == 3:
+            chunks, metadatas, chunk_ids = chunk_result
+        else:
+            chunks = [c.text for c in chunk_result]
+            metadatas = [c.metadata for c in chunk_result]
+            chunk_ids = [c.chunk_id for c in chunk_result]
 
         # Generate vector embeddings
         vectors = embeddings.embed(chunks)

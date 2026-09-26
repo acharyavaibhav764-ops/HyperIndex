@@ -27,8 +27,8 @@ gitGraph
    checkout main
    merge feat/parsing-architecture id: "parsing-arch merged"
    branch feat/pdf-deep-parser
-   commit id: "v5: PDF deep parser (DeepSeek-OCR2)"
-   commit id: "v6: vLLM migration (planned)"
+   commit id: "v5: PDF deep parser (SmolVLM)"
+   commit id: "v6: DeepSeek-OCR2 migration (planned)"
 ```
 
 ---
@@ -40,9 +40,9 @@ gitGraph
 | **v1** | `v1.md` | `BaseParser` abstract, `TextParser` (TXT/MD via `convert_string`), `ParserRouter` scaffold, `HybridChunker` in `Chunker` | Internal only — ingestion endpoint unchanged |
 | **v2** | `v2.md` | `DoclingParser` for `.docx` + `.pptx`, router updated; `HybridChunker.serialize()` critical fix; lightweight local picture description (SmolVLM-256M / Granite-Vision via Ollama) | Internal only |
 | **v3** | `v3.md` | `LibreOfficeConverter` for `.doc`/`.ppt`, router updated | Internal only |
-| **v4** | `parsing_arch_v4_pdf_stub.md` | `PdfStubParser` for `.pdf`, router covers all formats → **ingestion endpoint switched to `parser_router`** | **Branch merge to main** |
-| **v5** | `parsing_arch_v5_pdf_deep.md` | `PdfPageRouter` (per-page triage, PyMuPDF4LLM, Docling, DeepSeek-OCR2) | Separate branch off main post-merge |
-| **v6** | `parsing_arch_v6_vllm_migration.md` | Migrate DeepSeek-OCR2 serving from HF Transformers (v5) to vLLM for production batch throughput on PDF per-page OCR/VLM tier | Continuation off v5, after v5 is functional. **v6 is a planned future version only — not executable on current dev hardware (GTX 1650, 4GB VRAM). Full planning deferred until v5 is near-complete.** |
+| **v4** | `v4.md` | `PdfStubParser` for `.pdf`, router covers all formats → **ingestion endpoint switched to `parser_router`** | **Branch merge to main** |
+| **v5** | `v5.md` | `PdfPageRouter` (per-page triage, PyMuPDF4LLM, Docling, SmolVLM) | Separate branch off main post-merge |
+| **v6** | `parsing_arch_v6_vllm_migration.md` | Migrate from SmolVLM to DeepSeek-OCR2 and eventually vLLM for production batch throughput on PDF per-page OCR/VLM tier | Continuation off v5, after v5 is functional. **v6 is a planned future version only.** |
 
 ---
 
@@ -63,8 +63,8 @@ v1 Foundation
     └── v2 DOCX/PPTX + picture desc (requires BaseParser + DoclingParser)
             └── v3 Legacy (requires LibreOfficeConverter + DoclingParser from v2)
                     └── v4 PDF stub + pipeline (requires all formats + HybridChunker from v1)
-                            └── v5 PDF deep (requires PdfPageRouter + eval harness)
-                                    └── v6 vLLM migration (requires v5's DeepSeek-OCR2 integration working first)
+                            └── v5 PDF deep (requires PdfPageRouter + SmolVLM integration)
+                                    └── v6 DeepSeek-OCR2 migration (requires v5's SmolVLM integration working first)
 ```
 
 ---
@@ -90,8 +90,8 @@ v1 Foundation
 | `config.py` | v2 | [NEW] picture-description model settings (SmolVLM-256M primary preset, Granite-Vision-3.3-2B via Ollama as escalation — see v2.md) |
 | `core/parsers/pdf_router.py` | v5 | [NEW] |
 | `core/parser_router.py` | v5 | [MODIFY] swap .pdf to PdfPageRouter |
-| `config.py` | v5 | [NEW] DeepSeek-OCR2 settings — first appearance of DeepSeek-OCR2 in the codebase, PDF branch only |
-| `config.py` | v6 | [MODIFY] DeepSeek-OCR2 serving settings — migrate from HF Transformers to vLLM |
+| `config.py` | v5 | [MODIFY] Configure SmolVLM settings for PDF page routing |
+| `config.py` | v6 | [NEW] DeepSeek-OCR2 serving settings — migrate to DeepSeek-OCR2 and eventually vLLM |
 
 ---
 
@@ -106,8 +106,8 @@ tests/
     ├── v2/        (DOCX + PPTX + picture description + serialize() fix)
     ├── v3/        (Legacy formats)
     ├── v4/        (PDF stub + pipeline)
-    ├── v5/        (PDF deep parser)
-    └── v6/        (vLLM migration — placeholder, empty until v5 is near-complete)
+    ├── v5/        (PDF deep parser with SmolVLM)
+    └── v6/        (DeepSeek-OCR2 migration — placeholder, empty until v5 is near-complete)
 ```
 
 Each version's test directory is created alongside its plan document.

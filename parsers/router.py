@@ -6,6 +6,7 @@ from .base import BaseParser
 from .docling_parser import DoclingParser
 from .libreoffice_converter import LibreOfficeConverter
 from .text import TextParser
+from .pdf_router import PdfPageRouter
 
 
 class UnsupportedFileError(ValueError):
@@ -34,6 +35,7 @@ class ParserRouter:
         v1: TextParser for .txt / .md
         v2: DoclingParser for .docx / .pptx
         v3: LibreOfficeConverter for .doc / .ppt
+        v5: PdfPageRouter for .pdf (per-page triage; replaces PdfStubParser)
         """
         self._parsers: list[BaseParser] = []
         # v1: register TextParser for .txt / .md
@@ -42,6 +44,8 @@ class ParserRouter:
         self.register(DoclingParser())
         # v3: register LibreOfficeConverter for .doc / .ppt
         self.register(LibreOfficeConverter())
+        # v5: register PdfPageRouter for .pdf (replaces v4 PdfStubParser)
+        self.register(PdfPageRouter())
 
     # ------------------------------------------------------------------
     # Public API

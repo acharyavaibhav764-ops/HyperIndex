@@ -46,10 +46,11 @@ class TestParserRouterGetParser:
         with pytest.raises(UnsupportedFileError):
             router.get_parser("report.xyz")
 
-    def test_pdf_unsupported_in_v2(self, router):
-        """PDF is not yet supported in v2 — must raise UnsupportedFileError."""
-        with pytest.raises(UnsupportedFileError):
-            router.get_parser("file.pdf")
+    def test_pdf_supported_in_v5(self, router):
+        """PDF is supported from v5 onward via PdfPageRouter — must NOT raise."""
+        from parsers.pdf_router import PdfPageRouter
+        parser = router.get_parser("file.pdf")
+        assert isinstance(parser, PdfPageRouter)
 
     def test_doc_routes_to_libreoffice_converter(self, router):
         """v3: .doc now supported via LibreOfficeConverter — must NOT raise."""
@@ -87,9 +88,18 @@ class TestParserRouterParse:
         doc = router.parse(b"# Title\n\nContent here.", "notes.md")
         assert isinstance(doc, DoclingDocument)
 
-    def test_parse_unsupported_raises(self, router):
-        with pytest.raises(UnsupportedFileError):
+    def test_parse_pdf_does_not_raise_unsupported(self, router):
+        """v5: .pdf is supported — parse() must not raise UnsupportedFileError.
+
+        Note: passing dummy bytes will trigger a Docling ConversionError (not a
+        valid PDF), so we only assert that UnsupportedFileError is NOT raised.
+        """
+        import pytest
+        with pytest.raises(Exception) as exc_info:
             router.parse(b"%PDF-1.4", "file.pdf")
+        assert not isinstance(exc_info.value, UnsupportedFileError), (
+            "UnsupportedFileError should not be raised for .pdf in v5"
+        )
 
     # v2 additions
     def test_parse_docx_returns_document(self, router):

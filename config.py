@@ -45,12 +45,24 @@ class Settings:
         "Describe this image in 2-3 sentences. Be concise and accurate.",
     )
     enable_picture_description: bool = (
-        os.getenv("ENABLE_PICTURE_DESCRIPTION", "false").lower() == "true"
+        os.getenv("ENABLE_PICTURE_DESCRIPTION", "true").lower() == "true"
     )
 
     # Parsing Architecture v3 — LibreOffice headless converter (.doc / .ppt)
     libreoffice_binary: str = os.getenv("LIBREOFFICE_BINARY", "")
     libreoffice_timeout_seconds: int = int(os.getenv("LIBREOFFICE_TIMEOUT_SECONDS", "60"))
+
+    # Parsing Architecture v5 — PDF per-page triage (PdfPageRouter)
+    # Set ENABLE_PDF_PAGE_ROUTER=true to activate per-page routing.
+    # When false, PdfPageRouter falls back to full-document Docling conversion (stub-compatible).
+    enable_pdf_page_router: bool = (
+        os.getenv("ENABLE_PDF_PAGE_ROUTER", "true").lower() == "true"
+    )
+    # Ratio of text chars to page area below which a page is classified as image-heavy.
+    pdf_text_ratio_threshold: float = float(os.getenv("PDF_TEXT_RATIO_THRESHOLD", "0.05"))
+    # Max new tokens for SmolVLM inference on image-heavy PDF pages.
+    pdf_smolvlm_max_new_tokens: int = int(os.getenv("PDF_SMOLVLM_MAX_NEW_TOKENS", "200"))
+
 
 
 settings = Settings()
