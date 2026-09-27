@@ -42,6 +42,20 @@ via _build_vlm_converter() early-return. _repair_pdf_headings() is a new
 post-merge pass that demotes repeating boilerplate (running headers/footers)
 and promotes numbered paragraphs to SECTION_HEADER, fixing the heading-freeze
 observed in the real-pipeline run documented in docs/v5_2_plan.md.
+
+v5.3 notes
+----------
+_smolvlm_page() now calls _inject_picture_descriptions() before
+export_to_markdown(), applying the same token-cleanup and [Figure description]
+tagging that _picture_descriptions_only() already applied on the table+image
+path — closing the asymmetry where raw SmolVLM completion tokens (e.g.
+"<end_of_utteranc") leaked into image-only chunk text.
+_flatten_document() rebuilds the merged document as a flat structure where
+every text item is a direct child of body, bypassing add_document()'s
+cross-page nesting which caused HybridChunker's heading context to freeze
+(items' parent refs stayed anchored to stale per-page sub-tree roots) and
+orphaned items to land at the document tail. This unified fix resolves both
+Issue 2 (heading freeze) and Issue 4 (tail ordering) in one step.
 """
 import logging
 import re
@@ -143,6 +157,53 @@ def _repair_pdf_headings(
             dump = item.model_dump()
             dump["label"] = DocItemLabel.SECTION_HEADER
             doc.texts[i] = SectionHeaderItem(**dump)
+
+
+def _flatten_document(doc: DoclingDocument) -> DoclingDocument:
+    """Rebuild a merged multi-page document with every text item as a flat,
+    direct child of body — discarding whatever nesting add_document() produced
+    while threading independently-parsed per-page sub-documents together.
+
+    ``_merge_pages()`` has no real visual hierarchy to preserve — each page was
+    reconstructed from plain markdown, so nesting fidelity was already approximate.
+    Flattening trades that approximate, occasionally-wrong nesting for a flat
+    structure HybridChunker resolves unambiguously: each item's heading context
+    is the nearest preceding body-level SECTION_HEADER, full stop.  No stale
+    ancestor from a previous page can survive a page boundary because there are
+    no ancestors below body at all.
+
+    This resolves two linked symptoms from the same root cause (add_document()
+    threading per-page sub-trees into a shared tree with stale parent refs):
+
+    * **Heading freeze** — HybridChunker walks ``item.parent`` ancestors to build
+      ``chunk.meta.headings``; relabeling with _repair_pdf_headings() changes
+      ``item.label`` but leaves ``item.parent`` pointing into the stale sub-tree,
+      so the heading path never advances across the page boundary.  Flattening
+      makes every item's parent ``body`` directly, so the chunker reads the most
+      recent body-level SECTION_HEADER as the active heading, not a stale ancestor.
+
+    * **Tail-ordering orphans** — items that add_document() couldn't place in the
+      current group were pushed to the document tail regardless of page order.
+      Flattening rebuilds in ``doc.texts`` order (already correct after
+      _merge_pages()'s per-page loop) so no item can drift past its page boundary.
+
+    Args:
+        doc: Fully-merged DoclingDocument after _repair_pdf_headings() (modified
+             labels, but potentially stale parent refs).  Not modified in place.
+
+    Returns:
+        DoclingDocument: New document with the same text items (labels, text,
+                         prov) in the same order, all parented directly to body.
+    """
+    flat = DoclingDocument(name=doc.name)
+    for item in doc.texts:
+        new_item = flat.add_text(
+            label=item.label,
+            text=item.text or "",
+            parent=flat.body,
+        )
+        new_item.prov = item.prov  # carry page provenance over verbatim
+    return flat
 
 
 class PdfPageRouter(BaseParser):
@@ -359,8 +420,13 @@ class PdfPageRouter(BaseParser):
             if self._vlm_converter is None:
                 self._vlm_converter = _build_vlm_converter()
             stream = DocumentStream(name=filename, stream=BytesIO(file_bytes))
-            result = self._vlm_converter.convert(stream)
-            return result.document.export_to_markdown()
+            doc = self._vlm_converter.convert(stream).document
+            # v5.3 Fix 1: run the same cleanup+tagging pass used by
+            # _picture_descriptions_only() — strips dangling SmolVLM completion
+            # tokens (e.g. "<end_of_utteranc") and prefixes descriptions with
+            # "[Figure description]" for consistent downstream filtering.
+            _inject_picture_descriptions(doc)
+            return doc.export_to_markdown()
         except Exception as exc:
             logger.warning(
                 "SmolVLM failed for page %d of %s: %s. Falling back to PyMuPDF4LLM.",
@@ -455,6 +521,7 @@ class PdfPageRouter(BaseParser):
                 ]
             combined.add_document(page_doc)
 
-        # v5.2 Fix 2: repair heading integrity corrupted by per-page independent parsing
+        # v5.2 Fix 2: repair heading labels corrupted by per-page independent parsing
         _repair_pdf_headings(combined)
-        return combined
+        # v5.3 Fix 2: flatten tree so HybridChunker sees an unambiguous heading path
+        return _flatten_document(combined)

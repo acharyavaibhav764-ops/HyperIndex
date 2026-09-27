@@ -90,6 +90,7 @@ class TestMergePagesStampsProvenance:
 
         combined = MagicMock(spec=DoclingDocument)
         combined.texts = []  # v5.2: _repair_pdf_headings iterates .texts; must be iterable
+        combined.name = "manual"  # v5.3: _flatten_document reads doc.name
 
         with patch("parsers.pdf_router.DocumentConverter", side_effect=_fake_converter_factory), \
              patch("parsers.pdf_router.DoclingDocument", return_value=combined):
@@ -137,6 +138,7 @@ class TestMergePagesStampsProvenance:
 
         combined = MagicMock(spec=DoclingDocument)
         combined.texts = []  # v5.2: _repair_pdf_headings iterates .texts; must be iterable
+        combined.name = "doc"  # v5.3: _flatten_document reads doc.name
 
         with patch("parsers.pdf_router.DocumentConverter", side_effect=_fake_converter_factory), \
              patch("parsers.pdf_router.DoclingDocument", return_value=combined):
