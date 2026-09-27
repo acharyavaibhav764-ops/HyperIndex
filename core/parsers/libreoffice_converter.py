@@ -113,13 +113,14 @@ class LibreOfficeConverter(BaseParser):
     def _convert_to_openxml(self, file_bytes: bytes, filename: str) -> tuple[bytes, str]:
         """Convert raw bytes of .doc and .ppt files into .docx and .pptx"""
 
-        # Set the target format and confirm presence of libreoffice binaries
+        # Set the target format
         source_ext = Path(filename).suffix.lower()
         if source_ext not in self.TARGET_FORMAT_MAP:
             raise ValueError(f"Unsupported legacy format: '{source_ext}'")
         target_format = self.TARGET_FORMAT_MAP[source_ext]
         target_ext = f".{target_format}"
 
+        # Store the libreoffice executables in variable binary
         binary = find_libreoffice_binary()
 
         with tempfile.TemporaryDirectory() as temp_dir:
