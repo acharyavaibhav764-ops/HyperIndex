@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import tempfile
 from typing import Final
-
 from docling_core.types.doc import DoclingDocument
 
 from config import settings
@@ -16,15 +15,20 @@ logger = logging.getLogger(__name__)
 
 
 class LibreOfficeNotFoundError(RuntimeError):
+    """Represent base error for missing libre office binaries"""
+
     pass
 
-
 class LibreOfficeConversionError(RuntimeError):
+    """Represent base error for failed libre office binary execution"""
+
     pass
 
 
 def find_libreoffice_binary() -> str:
-    # 1. Configured path or env override
+    """Returns path to libreoffice binaries among different possible OS"""
+
+    # Environment/Container defined paths
     if settings.libreoffice_binary:
         configured = Path(settings.libreoffice_binary)
         if configured.is_file():
@@ -33,13 +37,13 @@ def find_libreoffice_binary() -> str:
         if which:
             return which
 
-    # 2. PATH resolution
+    # Fallback check for global binaries
     for name in ("libreoffice", "soffice"):
         which = shutil.which(name)
         if which:
             return which
 
-    # 3. Standard Windows install paths
+    # Standard Windows paths
     program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     for win_path in [
@@ -49,7 +53,7 @@ def find_libreoffice_binary() -> str:
         if win_path.is_file():
             return str(win_path)
 
-    # 4. Standard Linux / macOS paths
+    # Standard Linux / macOS paths
     for unix_path in [
         Path("/usr/bin/libreoffice"),
         Path("/usr/bin/soffice"),
@@ -67,10 +71,21 @@ def find_libreoffice_binary() -> str:
 
 class LibreOfficeConverter(BaseParser):
     """
-    Bridge parser that converts legacy Microsoft Office formats (.doc, .ppt)
-    to OpenXML (.docx, .pptx) using headless LibreOffice, then delegates
-    to DoclingParser.
+    Converts legacy Microsoft Office formats (.doc, .ppt) to OpenXML (.docx, .pptx) using 
+    LibreOffice, then delegates to DoclingParser.
+
+    Attributes:
+        SUPPORTED_EXTENSIONS:
+        TARGET_FORMAT_MAP:
+        _docling_parser: DoclingParser class to delegate openxml format of documents to
+        _timeout: 
+
+    Methods:
+        can_handle()
+        parse()
+        _convert_to_openxml()
     """
+
     SUPPORTED_EXTENSIONS: Final[frozenset[str]] = frozenset({".doc", ".ppt"})
     TARGET_FORMAT_MAP: Final[dict[str, str]] = {".doc": "docx", ".ppt": "pptx"}
 
@@ -79,45 +94,60 @@ class LibreOfficeConverter(BaseParser):
         docling_parser: DoclingParser | None = None,
         timeout: int | None = None,
     ) -> None:
+        """Configures docling parser and timeout"""
+        
         self._docling_parser = docling_parser or DoclingParser()
         self._timeout = timeout or settings.libreoffice_timeout_seconds
 
     def can_handle(self, ext: str) -> bool:
+        """True for .doc and .ppt"""
+
         return ext.lower() in self.SUPPORTED_EXTENSIONS
 
-    def convert_to_openxml(self, file_bytes: bytes, filename: str) -> tuple[bytes, str]:
+    def parse(self, file_bytes: bytes, filename: str, **kwargs) -> DoclingDocument:
+        """Convert raw bytes to .docx and .pptx format then delegate parsing to DoclingParser"""
+
+        converted_bytes, target_filename = self._convert_to_openxml(file_bytes, filename)
+        return self._docling_parser.parse(converted_bytes, target_filename, **kwargs)
+
+    def _convert_to_openxml(self, file_bytes: bytes, filename: str) -> tuple[bytes, str]:
+        """Convert raw bytes of .doc and .ppt files into .docx and .pptx"""
+
+        # Set the target format and confirm presence of libreoffice binaries
         source_ext = Path(filename).suffix.lower()
         if source_ext not in self.TARGET_FORMAT_MAP:
             raise ValueError(f"Unsupported legacy format: '{source_ext}'")
-
         target_format = self.TARGET_FORMAT_MAP[source_ext]
         target_ext = f".{target_format}"
+
         binary = find_libreoffice_binary()
 
         with tempfile.TemporaryDirectory() as temp_dir:
+
+            # Write the raw bytes to a file for libreoffice to execute upon
             temp_path = Path(temp_dir)
             input_file = temp_path / f"input{source_ext}"
             input_file.write_bytes(file_bytes)
-
-            # Isolated user profile prevents profile lock conflicts under concurrency
-            user_profile = (temp_path / "lo_profile").as_uri()
-
-            cmd = [
-                binary,
-                "--headless",
-                "--invisible",
-                "--nologo",
-                "--nodefault",
-                "--nofirststartwizard",
-                f"-env:UserInstallation={user_profile}",
-                "--convert-to",
-                target_format,
-                "--outdir",
-                str(temp_path),
-                str(input_file),
-            ]
+            user_profile = (temp_path / "lo_profile").as_uri() # Allows concurrent threading for libreoffice to bypass locks
 
             try:
+
+                # Execute the binary command for conversion
+                cmd = [
+                    binary,
+                    "--headless",
+                    "--invisible",
+                    "--nologo",
+                    "--nodefault",
+                    "--nofirststartwizard",
+                    f"-env:UserInstallation={user_profile}",
+                    "--convert-to",
+                    target_format,
+                    "--outdir",
+                    str(temp_path),
+                    str(input_file),
+                ]
+
                 proc = subprocess.run(
                     cmd,
                     capture_output=True,
@@ -125,6 +155,7 @@ class LibreOfficeConverter(BaseParser):
                     timeout=self._timeout,
                     check=False,
                 )
+
             except subprocess.TimeoutExpired as exc:
                 raise LibreOfficeConversionError(
                     f"LibreOffice conversion timed out after {self._timeout}s for '{filename}'"
@@ -134,22 +165,22 @@ class LibreOfficeConverter(BaseParser):
                     f"Failed to execute LibreOffice binary: {binary}"
                 ) from exc
 
+            # Handle failed libreoffice binary process
             if proc.returncode != 0:
                 err_msg = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
                 raise LibreOfficeConversionError(
                     f"LibreOffice conversion failed for '{filename}': {err_msg}"
                 )
 
+            # Handle missing target file
             expected_output = temp_path / f"input{target_ext}"
             if not expected_output.exists() or expected_output.stat().st_size == 0:
                 raise LibreOfficeConversionError(
                     f"LibreOffice failed to produce output '{expected_output.name}' for '{filename}'"
                 )
 
+            # Return converted file
             converted_bytes = expected_output.read_bytes()
             out_filename = Path(filename).with_suffix(target_ext).name
-            return converted_bytes, out_filename
 
-    def parse(self, file_bytes: bytes, filename: str, **kwargs) -> DoclingDocument:
-        converted_bytes, target_filename = self.convert_to_openxml(file_bytes, filename)
-        return self._docling_parser.parse(converted_bytes, target_filename, **kwargs)
+            return converted_bytes, out_filename
