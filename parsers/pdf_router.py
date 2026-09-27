@@ -9,21 +9,28 @@ optimal extraction backend:
   - SmolVLM      : image/diagram-heavy pages (via Docling VLM pipeline)
 
 Triage heuristics (all tunable via config):
-  - Tables  : page.find_tables().tables is non-empty → "table"
-  - Images  : page.get_images() is non-empty AND text_ratio < threshold → "image"
-  - Default : "text"
+  - Tables  : page.find_tables().tables is non-empty → "table" in routes
+  - Images  : page.get_images() non-empty AND text_len < pdf_min_text_chars_for_text_route → "image" in routes
+  - Both    : a page can carry both "table" and "image"; table md + picture
+              captions are merged so neither is dropped
+  - Default : ["text"]
 
 When settings.enable_pdf_page_router is False (default), parse() falls
 back to full-document Docling conversion — identical to PdfStubParser
 behaviour. This makes the v5 router a drop-in replacement with zero
 risk during initial rollout.
 
-v5 scope note
--------------
-_docling_page() and _smolvlm_page() currently process the full document
-rather than a single page because Docling 2.x does not yet expose a
-page-scoped export API. True per-page isolation is planned for v5.1.
-DeepSeek-OCR2 integration is deferred to v6.
+v5.1 notes
+----------
+_docling_page() and _smolvlm_page() now operate on single-page PDF bytes
+produced by _single_page_bytes(), ensuring true per-page isolation.
+Page provenance (page_no) is stamped in _merge_pages() via ProvenanceItem
+so that core/chunker.py correctly populates `page` and `page_numbers` in
+chunk metadata.
+_triage_page() now returns a list[str] so a page can simultaneously be
+"table" AND "image": Docling provides the table structure, while
+_picture_descriptions_only() appends figure captions from SmolVLM without
+duplicating body text. DeepSeek-OCR2 integration is deferred to v6.
 """
 import logging
 from io import BytesIO
@@ -32,23 +39,26 @@ import fitz  # PyMuPDF
 import pymupdf4llm
 from docling.document_converter import DocumentConverter
 from docling.datamodel.base_models import InputFormat
-from docling_core.types.doc import DoclingDocument
+from docling_core.types.doc import DoclingDocument, BoundingBox, ProvenanceItem, DocItemLabel
 from docling_core.types.io import DocumentStream
 
 from config import settings
 from .base import BaseParser
-from .docling_parser import _build_vlm_converter
+from .docling_parser import _build_vlm_converter, _inject_picture_descriptions
 
 logger = logging.getLogger(__name__)
 
 
 class PdfPageRouter(BaseParser):
     """
-    v5 PDF per-page triage router.
+    v5.1 PDF per-page triage router.
 
-    Each page is independently classified as text-heavy, table-bearing, or
-    image-dominant.  The classification drives routing to PyMuPDF4LLM,
-    Docling, or SmolVLM respectively.
+    Each page is independently classified via _triage_page(), which returns a
+    list of routes.  Pages with only "text" go to PyMuPDF4LLM.  Pages with
+    "table" go to Docling for structural extraction.  Pages with "image" go to
+    SmolVLM.  Pages with both "table" and "image" run Docling for table content
+    and _picture_descriptions_only() for figure captions — merged so neither
+    is dropped.
 
     Falls back to full-document Docling conversion when
     settings.enable_pdf_page_router is False.
@@ -98,22 +108,32 @@ class PdfPageRouter(BaseParser):
         page_markdowns: list[str] = []
 
         for page in pdf:
-            route = self._triage_page(page)
-            logger.debug("Page %d → route=%s", page.number, route)
+            routes = self._triage_page(page)
+            logger.debug("Page %d → routes=%s", page.number, routes)
 
-            if route == "text":
-                md = pymupdf4llm.to_markdown(pdf, pages=[page.number])
-                page_markdowns.append(md)
-            elif route == "table":
-                # Extract just this page so _docling_page does not process the full doc
-                single_bytes = self._single_page_bytes(pdf, page.number)
-                md = self._docling_page(single_bytes, filename, page.number)
-                page_markdowns.append(md)
-            else:  # "image"
-                # Extract just this page so _smolvlm_page does not process the full doc
-                single_bytes = self._single_page_bytes(pdf, page.number)
-                md = self._smolvlm_page(single_bytes, filename, page.number)
-                page_markdowns.append(md)
+            if routes == ["text"]:
+                # Fast path: no tables or images — plain PyMuPDF4LLM extraction
+                page_markdowns.append(pymupdf4llm.to_markdown(pdf, pages=[page.number]))
+                continue
+
+            # Heavy path: at least one of table / image
+            single_bytes = self._single_page_bytes(pdf, page.number)
+            parts: list[str] = []
+
+            if "table" in routes:
+                parts.append(self._docling_page(single_bytes, filename, page.number))
+
+            if "image" in routes:
+                if "table" in routes:
+                    # Table content already captured above; add only picture captions
+                    # to avoid duplicating the body text.
+                    parts.append(
+                        self._picture_descriptions_only(single_bytes, filename, page.number)
+                    )
+                else:
+                    parts.append(self._smolvlm_page(single_bytes, filename, page.number))
+
+            page_markdowns.append("\n\n".join(p for p in parts if p))
 
         pdf.close()
         return self._merge_pages(page_markdowns, filename)
@@ -143,30 +163,38 @@ class PdfPageRouter(BaseParser):
     # Triage
     # ------------------------------------------------------------------
 
-    def _triage_page(self, page: fitz.Page) -> str:
-        """Classify a single PDF page into a routing category.
+    def _triage_page(self, page: fitz.Page) -> list[str]:
+        """Classify a single PDF page into one or more routing categories.
+
+        Returns a list so a page can simultaneously be ``'table'`` and
+        ``'image'``.  A page with only text returns ``['text']``.
 
         Args:
             page: A ``fitz.Page`` object from an open ``fitz.Document``.
 
         Returns:
-            str: One of ``'text'``, ``'table'``, or ``'image'``.
+            list[str]: Non-empty list containing any of ``'text'``,
+                       ``'table'``, ``'image'``.
         """
-        # Table detection takes priority — Docling gives the best table output
+        routes: list[str] = []
+
+        # Table detection — Docling gives the best structural extraction
         if len(page.find_tables().tables) > 0:
-            return "table"
+            routes.append("table")
 
-        # Image / low-text pages go to SmolVLM
+        # Image / low-text detection
+        # Compare against an absolute character count rather than a ratio
+        # against page area.  The old ratio required ~25,000 chars on A4 to
+        # reach the 0.05 threshold — far beyond any realistic page — so nearly
+        # every image-bearing page incorrectly routed to SmolVLM.
         has_image = len(page.get_images()) > 0
-        area = page.rect.width * page.rect.height
         text_len = len(page.get_text())
-        text_ratio = text_len / area if area > 0 else 0.0
 
-        if has_image and text_ratio < settings.pdf_text_ratio_threshold:
-            return "image"
+        if has_image and text_len < settings.pdf_min_text_chars_for_text_route:
+            routes.append("image")
 
         # Default: fast PyMuPDF4LLM extraction
-        return "text"
+        return routes or ["text"]
 
     # ------------------------------------------------------------------
     # Per-tier extractors
@@ -194,13 +222,14 @@ class PdfPageRouter(BaseParser):
     def _docling_page(self, file_bytes: bytes, filename: str, page_no: int) -> str:
         """Extract a table-bearing page via Docling and return its markdown.
 
-        v5 scope note: exports the full document, not just page_no.
-        True page-scoped export is deferred to v5.1 pending Docling API support.
+        Receives single-page PDF bytes produced by _single_page_bytes(), so
+        Docling processes only the requested page.  Page provenance is stamped
+        downstream in _merge_pages() using ProvenanceItem.
 
         Args:
-            file_bytes: Raw PDF bytes.
+            file_bytes: Raw single-page PDF bytes.
             filename:   Original filename.
-            page_no:    Zero-indexed page number (informational only for now).
+            page_no:    Zero-indexed page number (used for logging).
 
         Returns:
             str: Markdown string for the page's content.
@@ -214,15 +243,18 @@ class PdfPageRouter(BaseParser):
         Reuses ``_build_vlm_converter()`` from docling_parser — the same
         SmolVLM-256M-Instruct preset already used for DOCX/PPTX picture description.
 
-        Falls back to PyMuPDF4LLM text extraction if VLM conversion fails.
+        Receives single-page PDF bytes produced by _single_page_bytes(), so
+        SmolVLM inference runs only on the requested page.  Page provenance is
+        stamped downstream in _merge_pages() using ProvenanceItem.
 
-        v5 scope note: processes the full document, not just page_no.
-        True per-page image rendering + inference is deferred to v5.1.
+        Falls back to PyMuPDF4LLM text extraction if VLM conversion fails.
+        The fallback always uses ``pages=[0]`` because ``file_bytes`` is already
+        a single-page PDF from _single_page_bytes().
 
         Args:
-            file_bytes: Raw PDF bytes.
+            file_bytes: Raw single-page PDF bytes.
             filename:   Original filename.
-            page_no:    Zero-indexed page number (informational only for now).
+            page_no:    Zero-indexed page number (used for logging).
 
         Returns:
             str: Markdown string with figure descriptions injected.
@@ -239,9 +271,54 @@ class PdfPageRouter(BaseParser):
                 page_no, filename, exc,
             )
             pdf = fitz.open(stream=file_bytes, filetype="pdf")
-            md = pymupdf4llm.to_markdown(pdf, pages=[page_no])
+            # file_bytes is a single-page PDF; the only valid page index is 0
+            md = pymupdf4llm.to_markdown(pdf, pages=[0])
             pdf.close()
             return md
+
+    def _picture_descriptions_only(
+        self, file_bytes: bytes, filename: str, page_no: int
+    ) -> str:
+        """Extract SmolVLM picture-description captions for a page that also has a table.
+
+        Used when _triage_page() returns both ``'table'`` and ``'image'``.  The
+        full Docling markdown is already captured by ``_docling_page()``; this
+        method adds only the ``[Figure description]`` captions from SmolVLM so
+        that neither the table content nor the image description is dropped,
+        and the body text is not duplicated.
+
+        Falls back silently — if SmolVLM fails the table content is kept and the
+        image description is skipped for this page.
+
+        Args:
+            file_bytes: Raw single-page PDF bytes.
+            filename:   Original filename.
+            page_no:    Zero-indexed page number (used for logging).
+
+        Returns:
+            str: Newline-joined ``[Figure description]`` captions, or ``""`` on
+                 failure.
+        """
+        try:
+            if self._vlm_converter is None:
+                self._vlm_converter = _build_vlm_converter()
+            stream = DocumentStream(name=filename, stream=BytesIO(file_bytes))
+            doc = self._vlm_converter.convert(stream).document
+            _inject_picture_descriptions(doc)
+            return "\n\n".join(
+                item.text
+                for item in doc.texts
+                if item.label == DocItemLabel.CAPTION
+                and item.text
+                and item.text.startswith("[Figure description]")
+            )
+        except Exception as exc:
+            logger.warning(
+                "Picture description failed for page %d of %s: %s. "
+                "Keeping table content; skipping image description for this page.",
+                page_no, filename, exc,
+            )
+            return ""
 
     # ------------------------------------------------------------------
     # Result assembly
@@ -250,25 +327,36 @@ class PdfPageRouter(BaseParser):
     def _merge_pages(self, page_markdowns: list[str], filename: str) -> DoclingDocument:
         """Combine per-page markdown strings into a single DoclingDocument.
 
-        Page markdowns are joined with a horizontal-rule separator then
-        converted back to a DoclingDocument via Docling's Markdown pipeline.
+        Each page markdown is converted independently so that a real
+        ProvenanceItem (with the correct page_no) can be stamped on every
+        text item before it is merged into the combined document.  This
+        ensures core/chunker.py's _split_docling() sees non-empty prov lists
+        and populates `page` / `page_numbers` in chunk metadata correctly.
 
         Args:
-            page_markdowns: List of markdown strings, one per page.
-            filename:       Original PDF filename (used to derive MD stream name).
+            page_markdowns: List of markdown strings, one per page (1-indexed).
+            filename:       Original PDF filename (used to derive MD stream names).
 
         Returns:
             DoclingDocument: Merged structured document ready for chunking.
         """
-        combined_md = "\n\n---\n\n".join(page_markdowns)
-        md_filename = filename.rsplit(".", 1)[0] + ".md"
+        combined = DoclingDocument(name=filename.rsplit(".", 1)[0])
+        converter = DocumentConverter(allowed_formats=[InputFormat.MD])
 
-        converter = DocumentConverter(
-            allowed_formats=[InputFormat.MD],
-        )
-        stream = DocumentStream(
-            name=md_filename,
-            stream=BytesIO(combined_md.encode("utf-8")),
-        )
-        result = converter.convert(stream)
-        return result.document
+        for page_no, md in enumerate(page_markdowns, start=1):  # 1-indexed for humans
+            stream = DocumentStream(
+                name=f"page_{page_no}.md",
+                stream=BytesIO(md.encode("utf-8")),
+            )
+            page_doc = converter.convert(stream).document
+            for item in page_doc.texts:
+                item.prov = [
+                    ProvenanceItem(
+                        page_no=page_no,
+                        bbox=BoundingBox(l=0, t=0, r=0, b=0),  # no real coords in markdown
+                        charspan=(0, len(item.text or "")),
+                    )
+                ]
+            combined.add_document(page_doc)
+
+        return combined

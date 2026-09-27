@@ -46,6 +46,7 @@ from docling.document_converter import (
     DocumentConverter,
     WordFormatOption,
     PowerpointFormatOption,
+    PdfFormatOption,
 )
 from docling_core.types.doc import DocItemLabel, DoclingDocument, SectionHeaderItem
 from docling_core.types.io import DocumentStream
@@ -65,7 +66,7 @@ def _build_vlm_converter() -> DocumentConverter:
 
     Returns:
         DocumentConverter: Converter with VLM pipeline options applied to
-                           both DOCX and PPTX format options.
+                           DOCX, PPTX, and PDF format options.
     """
     from docling.datamodel.pipeline_options import (
         ConvertPipelineOptions,
@@ -99,6 +100,7 @@ def _build_vlm_converter() -> DocumentConverter:
         format_options={
             InputFormat.DOCX: WordFormatOption(pipeline_options=pipeline_options),
             InputFormat.PPTX: PowerpointFormatOption(pipeline_options=pipeline_options),
+            InputFormat.PDF:  PdfFormatOption(pipeline_options=pipeline_options),  # v5.1: enables SmolVLM on PDF pages
         }
     )
 

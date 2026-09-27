@@ -13,7 +13,7 @@ def _reload_settings(overrides: dict[str, str] | None = None):
     """Reload config.Settings with a clean env, applying any overrides."""
     env_backup = os.environ.copy()
     # Clear the three v5 keys so we get clean defaults
-    for key in ("ENABLE_PDF_PAGE_ROUTER", "PDF_TEXT_RATIO_THRESHOLD", "PDF_SMOLVLM_MAX_NEW_TOKENS"):
+    for key in ("ENABLE_PDF_PAGE_ROUTER", "PDF_MIN_TEXT_CHARS_FOR_TEXT_ROUTE", "PDF_SMOLVLM_MAX_NEW_TOKENS"):
         os.environ.pop(key, None)
     if overrides:
         os.environ.update(overrides)
@@ -32,9 +32,10 @@ class TestV5ConfigDefaults:
         s = _reload_settings()
         assert s.enable_pdf_page_router is True
 
-    def test_pdf_text_ratio_threshold_default(self):
+    def test_pdf_min_text_chars_default(self):
+        # v5.1: replaced pdf_text_ratio_threshold with an absolute char count.
         s = _reload_settings()
-        assert s.pdf_text_ratio_threshold == pytest.approx(0.05)
+        assert s.pdf_min_text_chars_for_text_route == 800
 
     def test_pdf_smolvlm_max_new_tokens_default(self):
         s = _reload_settings()
@@ -51,9 +52,10 @@ class TestV5ConfigOverrides:
         s = _reload_settings({"ENABLE_PDF_PAGE_ROUTER": "True"})
         assert s.enable_pdf_page_router is True
 
-    def test_pdf_text_ratio_threshold_override(self):
-        s = _reload_settings({"PDF_TEXT_RATIO_THRESHOLD": "0.1"})
-        assert s.pdf_text_ratio_threshold == pytest.approx(0.1)
+    def test_pdf_min_text_chars_override(self):
+        # v5.1: env var name changed to PDF_MIN_TEXT_CHARS_FOR_TEXT_ROUTE.
+        s = _reload_settings({"PDF_MIN_TEXT_CHARS_FOR_TEXT_ROUTE": "1500"})
+        assert s.pdf_min_text_chars_for_text_route == 1500
 
     def test_pdf_smolvlm_max_new_tokens_override(self):
         s = _reload_settings({"PDF_SMOLVLM_MAX_NEW_TOKENS": "512"})

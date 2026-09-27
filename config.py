@@ -58,8 +58,11 @@ class Settings:
     enable_pdf_page_router: bool = (
         os.getenv("ENABLE_PDF_PAGE_ROUTER", "true").lower() == "true"
     )
-    # Ratio of text chars to page area below which a page is classified as image-heavy.
-    pdf_text_ratio_threshold: float = float(os.getenv("PDF_TEXT_RATIO_THRESHOLD", "0.05"))
+    # v5.1: absolute character count below which a page with an image is classified
+    # as image-heavy and routed to SmolVLM.  Replaces the old pdf_text_ratio_threshold
+    # (ratio vs page area), which required ~25,000 chars on A4 to clear the bar —
+    # far beyond realistic page density.  Tune against real Honeywell manual pages.
+    pdf_min_text_chars_for_text_route: int = int(os.getenv("PDF_MIN_TEXT_CHARS_FOR_TEXT_ROUTE", "800"))
     # Max new tokens for SmolVLM inference on image-heavy PDF pages.
     pdf_smolvlm_max_new_tokens: int = int(os.getenv("PDF_SMOLVLM_MAX_NEW_TOKENS", "200"))
 
