@@ -65,6 +65,11 @@ class Settings:
     pdf_min_text_chars_for_text_route: int = int(os.getenv("PDF_MIN_TEXT_CHARS_FOR_TEXT_ROUTE", "800"))
     # Max new tokens for SmolVLM inference on image-heavy PDF pages.
     pdf_smolvlm_max_new_tokens: int = int(os.getenv("PDF_SMOLVLM_MAX_NEW_TOKENS", "200"))
+    # v5.2: minimum number of distinct pages a text string must appear on to be
+    # classified as boilerplate (running header/footer) and demoted from
+    # SECTION_HEADER/TITLE to PARAGRAPH by _repair_pdf_headings().
+    pdf_boilerplate_min_page_repeats: int = int(os.getenv("PDF_BOILERPLATE_MIN_PAGE_REPEATS", "3"))
+
 
 
 

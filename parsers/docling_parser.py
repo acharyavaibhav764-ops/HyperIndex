@@ -64,14 +64,25 @@ def _build_vlm_converter() -> DocumentConverter:
     specified by ``settings.picture_description_preset``.  Falls back to the
     ``smolvlm`` preset if the configured preset is not registered.
 
+    If ``settings.enable_picture_description`` is False, returns a plain
+    ``DocumentConverter()`` immediately so PDF callers (which always call this
+    function when on the image tier) also respect the opt-out flag — matching
+    the gating already applied in ``DoclingParser.parse()`` for DOCX/PPTX.
+
     Returns:
         DocumentConverter: Converter with VLM pipeline options applied to
-                           DOCX, PPTX, and PDF format options.
+                           DOCX, PPTX, and PDF format options; or a plain
+                           DocumentConverter if picture description is disabled.
     """
     from docling.datamodel.pipeline_options import (
         ConvertPipelineOptions,
+        PdfPipelineOptions,
         PictureDescriptionVlmEngineOptions,
     )
+
+    # Fix 3: honour the opt-out flag for PDF callers too, matching DoclingParser.parse()
+    if not settings.enable_picture_description:
+        return DocumentConverter()
 
     try:
         picture_opts = PictureDescriptionVlmEngineOptions.from_preset(
@@ -90,17 +101,30 @@ def _build_vlm_converter() -> DocumentConverter:
             update={"prompt": settings.picture_description_prompt}
         )
 
+    # DOCX/PPTX use the generic pipeline options class (no PDF-specific fields needed)
     pipeline_options = ConvertPipelineOptions(
         do_picture_classification=True,
         do_picture_description=True,
         picture_description_options=picture_opts,
     )
 
+    # Fix 1: PDF needs PdfPipelineOptions — the PDF-specific subclass that carries
+    # generate_page_images, OCR options, and table-structure options.
+    # ConvertPipelineOptions (used in v5.1 Fix 4a) has none of those fields, so
+    # SmolVLM's page-rasterisation path threw AttributeError on every PDF page,
+    # silently falling back to PyMuPDF4LLM — meaning the VLM never actually ran.
+    pdf_pipeline_options = PdfPipelineOptions(
+        do_picture_classification=True,
+        do_picture_description=True,
+        picture_description_options=picture_opts,
+        generate_page_images=True,   # required: VLM needs a rasterised page to see
+    )
+
     return DocumentConverter(
         format_options={
             InputFormat.DOCX: WordFormatOption(pipeline_options=pipeline_options),
             InputFormat.PPTX: PowerpointFormatOption(pipeline_options=pipeline_options),
-            InputFormat.PDF:  PdfFormatOption(pipeline_options=pipeline_options),  # v5.1: enables SmolVLM on PDF pages
+            InputFormat.PDF:  PdfFormatOption(pipeline_options=pdf_pipeline_options),  # v5.2 Fix 1
         }
     )
 

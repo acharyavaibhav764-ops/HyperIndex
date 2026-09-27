@@ -31,15 +31,34 @@ _triage_page() now returns a list[str] so a page can simultaneously be
 "table" AND "image": Docling provides the table structure, while
 _picture_descriptions_only() appends figure captions from SmolVLM without
 duplicating body text. DeepSeek-OCR2 integration is deferred to v6.
+
+v5.2 notes
+----------
+_build_vlm_converter() now uses PdfPipelineOptions for the PDF format entry
+(fix for ConvertPipelineOptions not having generate_page_images; v5.1 Fix 4a
+had the right idea but wrong options class). _smolvlm_page() /
+_picture_descriptions_only() now honour settings.enable_picture_description
+via _build_vlm_converter() early-return. _repair_pdf_headings() is a new
+post-merge pass that demotes repeating boilerplate (running headers/footers)
+and promotes numbered paragraphs to SECTION_HEADER, fixing the heading-freeze
+observed in the real-pipeline run documented in docs/v5_2_plan.md.
 """
 import logging
+import re
 from io import BytesIO
 
 import fitz  # PyMuPDF
 import pymupdf4llm
 from docling.document_converter import DocumentConverter
 from docling.datamodel.base_models import InputFormat
-from docling_core.types.doc import DoclingDocument, BoundingBox, ProvenanceItem, DocItemLabel
+from docling_core.types.doc import (
+    DoclingDocument,
+    BoundingBox,
+    ProvenanceItem,
+    DocItemLabel,
+    TextItem,
+    SectionHeaderItem,
+)
 from docling_core.types.io import DocumentStream
 
 from config import settings
@@ -47,6 +66,83 @@ from .base import BaseParser
 from .docling_parser import _build_vlm_converter, _inject_picture_descriptions
 
 logger = logging.getLogger(__name__)
+
+# Matches standard technical-doc numbered headings: "7.6 Specificity", "9.4.2 Proteins"
+# Groups: one or more digit-dot segments followed by a non-whitespace word.
+_NUMBERED_HEADING_RE = re.compile(r"^\d+(\.\d+){0,3}\s+\S")
+
+
+def _repair_pdf_headings(
+    doc: DoclingDocument,
+    min_page_repeats: int | None = None,
+) -> None:
+    """Fix heading fidelity lost by _merge_pages()'s per-page independent parsing.
+
+    Two passes run against the fully-merged document (requires all pages present
+    to detect cross-page repetition):
+
+    1. **Boilerplate demotion** — any text string that appears verbatim on
+       ``>= min_page_repeats`` distinct pages is a running header/footer, not a
+       real heading.  If a per-page heuristic mistagged it as SECTION_HEADER or
+       TITLE it is replaced with a PARAGRAPH TextItem so it never enters
+       ``chunk.meta.headings``.
+
+    2. **Numbered heading promotion** — any PARAGRAPH whose text matches the
+       standard ``N.N[.N[.N]] <word>`` technical-doc pattern is promoted to
+       SECTION_HEADER so HybridChunker's heading path advances rather than
+       freezing on the last lucky per-page promotion.
+
+    Uses the model_dump()-swap technique already used in
+    ``_promote_pptx_pseudo_headings()`` for the sibling PPTX problem.
+
+    Args:
+        doc:              Fully-merged DoclingDocument (modified in place).
+        min_page_repeats: Override for the boilerplate threshold; defaults to
+                          ``settings.pdf_boilerplate_min_page_repeats`` (3).
+    """
+    threshold = min_page_repeats if min_page_repeats is not None \
+        else settings.pdf_boilerplate_min_page_repeats
+
+    # Pass 1 — collect page counts per unique text string
+    pages_seen_on: dict[str, set[int]] = {}
+    for item in doc.texts:
+        stripped = (item.text or "").strip()
+        page_no = item.prov[0].page_no if getattr(item, "prov", None) else None
+        if stripped and page_no is not None:
+            pages_seen_on.setdefault(stripped, set()).add(page_no)
+
+    boilerplate: set[str] = {
+        t for t, pages in pages_seen_on.items() if len(pages) >= threshold
+    }
+
+    # Pass 2 — demote boilerplate, promote numbered headings
+    for i, item in enumerate(doc.texts):
+        stripped = (item.text or "").strip()
+        if not stripped:
+            continue
+
+        # Demote boilerplate that slipped through as a heading
+        if (
+            item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE)
+            and stripped in boilerplate
+        ):
+            dump = item.model_dump()
+            dump["label"] = DocItemLabel.PARAGRAPH
+            # SectionHeaderItem.model_dump() includes 'level' which TextItem rejects;
+            # filter to only the fields TextItem accepts before constructing.
+            text_fields = TextItem.model_fields.keys()
+            doc.texts[i] = TextItem(**{k: v for k, v in dump.items() if k in text_fields})
+            continue
+
+        # Promote numbered paragraphs to section headers
+        if (
+            item.label == DocItemLabel.PARAGRAPH
+            and len(stripped) < 100
+            and _NUMBERED_HEADING_RE.match(stripped)
+        ):
+            dump = item.model_dump()
+            dump["label"] = DocItemLabel.SECTION_HEADER
+            doc.texts[i] = SectionHeaderItem(**dump)
 
 
 class PdfPageRouter(BaseParser):
@@ -359,4 +455,6 @@ class PdfPageRouter(BaseParser):
                 ]
             combined.add_document(page_doc)
 
+        # v5.2 Fix 2: repair heading integrity corrupted by per-page independent parsing
+        _repair_pdf_headings(combined)
         return combined
