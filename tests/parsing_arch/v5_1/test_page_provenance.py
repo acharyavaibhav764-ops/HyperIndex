@@ -130,6 +130,8 @@ class TestMergePagesStampsProvenance:
 
                 page_doc = MagicMock(spec=DoclingDocument)
                 page_doc.texts = [item]
+                # v5.3: _merge_pages now stamps prov via iterate_items(), not just .texts
+                page_doc.iterate_items.return_value = [(item, 1)]
                 result.document = page_doc
                 return result
 

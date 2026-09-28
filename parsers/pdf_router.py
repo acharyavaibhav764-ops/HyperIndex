@@ -491,9 +491,15 @@ class PdfPageRouter(BaseParser):
 
         Each page markdown is converted independently so that a real
         ProvenanceItem (with the correct page_no) can be stamped on every
-        text item before it is merged into the combined document.  This
-        ensures core/chunker.py's _split_docling() sees non-empty prov lists
-        and populates `page` / `page_numbers` in chunk metadata correctly.
+        item (text, table, picture) before it is merged into the combined
+        document.  This ensures core/chunker.py's _split_docling() sees
+        non-empty prov lists and populates ``page`` / ``page_numbers`` in
+        chunk metadata correctly.
+
+        Note: prov is stamped on ALL item types via ``page_doc.iterate_items()``
+        (not just ``page_doc.texts``) to avoid table and picture items keeping
+        their default page_no=1 (the single-page PDF's internal page number)
+        which caused them to appear as orphaned tail chunks in the output.
 
         Args:
             page_markdowns: List of markdown strings, one per page (1-indexed).
@@ -511,14 +517,18 @@ class PdfPageRouter(BaseParser):
                 stream=BytesIO(md.encode("utf-8")),
             )
             page_doc = converter.convert(stream).document
-            for item in page_doc.texts:
-                item.prov = [
-                    ProvenanceItem(
-                        page_no=page_no,
-                        bbox=BoundingBox(l=0, t=0, r=0, b=0),  # no real coords in markdown
-                        charspan=(0, len(item.text or "")),
-                    )
-                ]
+            # v5.3 Fix: stamp prov on ALL item types (texts + tables + pictures),
+            # not just page_doc.texts — table items kept their default prov
+            # page_no=1 (docling's internal single-page numbering) which caused
+            # them to appear as orphaned tail chunks after the correct-page chunks.
+            prov = ProvenanceItem(
+                page_no=page_no,
+                bbox=BoundingBox(l=0, t=0, r=0, b=0),
+                charspan=(0, 0),
+            )
+            for item, _ in page_doc.iterate_items():
+                if hasattr(item, 'prov'):
+                    item.prov = [prov]
             combined.add_document(page_doc)
 
         # v5.2 Fix 2: repair heading labels corrupted by per-page independent parsing
