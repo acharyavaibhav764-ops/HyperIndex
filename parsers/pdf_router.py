@@ -160,40 +160,23 @@ def _repair_pdf_headings(
 
 
 def _flatten_document(doc: DoclingDocument) -> DoclingDocument:
-    """Rebuild a merged multi-page document with every text item as a flat,
-    direct child of body — discarding whatever nesting add_document() produced
-    while threading independently-parsed per-page sub-documents together.
+    """v5.3 candidate — reverted in v5.4. Do not call.
 
-    ``_merge_pages()`` has no real visual hierarchy to preserve — each page was
-    reconstructed from plain markdown, so nesting fidelity was already approximate.
-    Flattening trades that approximate, occasionally-wrong nesting for a flat
-    structure HybridChunker resolves unambiguously: each item's heading context
-    is the nearest preceding body-level SECTION_HEADER, full stop.  No stale
-    ancestor from a previous page can survive a page boundary because there are
-    no ancestors below body at all.
+    Only walked ``doc.texts``; ``doc.tables`` was never touched, so every table
+    in the document was silently dropped on the real PDF smoke test.  It also
+    produced zero measurable change to the heading freeze or tail-ordering bugs
+    it was written to fix (confirmed by direct before/after chunk comparison
+    against v5.2 output).  Even a corrected version that also handled tables
+    would not have been worth the complexity without evidence that reparenting
+    is actually the mechanism behind either bug.
 
-    This resolves two linked symptoms from the same root cause (add_document()
-    threading per-page sub-trees into a shared tree with stale parent refs):
-
-    * **Heading freeze** — HybridChunker walks ``item.parent`` ancestors to build
-      ``chunk.meta.headings``; relabeling with _repair_pdf_headings() changes
-      ``item.label`` but leaves ``item.parent`` pointing into the stale sub-tree,
-      so the heading path never advances across the page boundary.  Flattening
-      makes every item's parent ``body`` directly, so the chunker reads the most
-      recent body-level SECTION_HEADER as the active heading, not a stale ancestor.
-
-    * **Tail-ordering orphans** — items that add_document() couldn't place in the
-      current group were pushed to the document tail regardless of page order.
-      Flattening rebuilds in ``doc.texts`` order (already correct after
-      _merge_pages()'s per-page loop) so no item can drift past its page boundary.
+    Kept here for reference; do not re-enable without new evidence.
 
     Args:
-        doc: Fully-merged DoclingDocument after _repair_pdf_headings() (modified
-             labels, but potentially stale parent refs).  Not modified in place.
+        doc: Fully-merged DoclingDocument (not used — function is unreachable).
 
     Returns:
-        DoclingDocument: New document with the same text items (labels, text,
-                         prov) in the same order, all parented directly to body.
+        DoclingDocument: Flat document (not reached in any active code path).
     """
     flat = DoclingDocument(name=doc.name)
     for item in doc.texts:
@@ -533,5 +516,35 @@ class PdfPageRouter(BaseParser):
 
         # v5.2 Fix 2: repair heading labels corrupted by per-page independent parsing
         _repair_pdf_headings(combined)
-        # v5.3 Fix 2: flatten tree so HybridChunker sees an unambiguous heading path
-        return _flatten_document(combined)
+
+        # v5.4 Diagnostic A+B — gated behind PDF_DEBUG_HEADING_DUMP=1 (default off).
+        # Diagnostic A: log level of each SECTION_HEADER to test the heading-level
+        #   hypothesis (promoted headings may all share a wrong default level, causing
+        #   HybridChunker to not advance heading context across them).
+        # Diagnostic B: log flat-list index of known orphan items to determine whether
+        #   the ordering bug is in add_document()'s append order or in downstream
+        #   tree-traversal by HybridChunker / export_to_markdown().
+        if settings.pdf_debug_heading_dump:
+            for item in combined.texts:
+                if item.label == DocItemLabel.SECTION_HEADER:
+                    text_preview = (item.text or "")[:40]
+                    level = getattr(item, "level", "<no level attr>")
+                    page_no = item.prov[0].page_no if item.prov else None
+                    logger.info(
+                        "HEADING page=%s level=%s text=%r",
+                        page_no, level, text_preview,
+                    )
+            total = len(combined.texts)
+            orphan_markers = ("Advanced Circuit", "CONTENTS", "FULUOURIMEY", "Animal Protein")
+            for idx, item in enumerate(combined.texts):
+                text_preview = (item.text or "")[:30]
+                if any(marker in text_preview for marker in orphan_markers):
+                    page_no = item.prov[0].page_no if item.prov else None
+                    logger.info(
+                        "ORPHAN-CHECK index=%d/%d page=%s text=%r",
+                        idx, total, page_no, text_preview,
+                    )
+
+        # v5.3 _flatten_document() was reverted in v5.4 — it silently dropped
+        # doc.tables and produced no measurable improvement to either bug.
+        return combined

@@ -69,6 +69,11 @@ class Settings:
     # classified as boilerplate (running header/footer) and demoted from
     # SECTION_HEADER/TITLE to PARAGRAPH by _repair_pdf_headings().
     pdf_boilerplate_min_page_repeats: int = int(os.getenv("PDF_BOILERPLATE_MIN_PAGE_REPEATS", "3"))
+    # v5.4: diagnostic flag — when set to 1, _merge_pages() logs heading levels
+    # and orphan-check indices so the heading-freeze and tail-ordering bugs can be
+    # traced.  Off by default; set PDF_DEBUG_HEADING_DUMP=1 when running test_parse.py
+    # to collect the diagnostic output.  Never enable in production.
+    pdf_debug_heading_dump: bool = bool(int(os.getenv("PDF_DEBUG_HEADING_DUMP", "0")))
 
 
 
