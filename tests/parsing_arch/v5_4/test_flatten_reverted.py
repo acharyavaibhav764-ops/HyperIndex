@@ -135,36 +135,34 @@ class TestDebugHeadingDumpDefaultOff:
             "Set PDF_DEBUG_HEADING_DUMP=1 only for local diagnostic runs."
         )
 
-    def test_no_heading_log_lines_emitted_by_default(self, caplog):
-        """No HEADING/ORPHAN-CHECK log lines must appear from _merge_pages()
+    def test_no_heading_log_lines_emitted_by_default(self, capsys):
+        """No HEADING/ORPHAN-CHECK lines must appear on stdout from _merge_pages()
         unless PDF_DEBUG_HEADING_DUMP=1 is explicitly set.
 
         This ensures the diagnostic can never accidentally leak into production
-        logs when the environment variable is absent (the common case).
+        output when the environment variable is absent (the common case).
         """
         router = PdfPageRouter()
+        router._merge_pages([_TEXT_MARKDOWN, _TABLE_MARKDOWN], "test.pdf")
 
-        with caplog.at_level(logging.INFO, logger="parsers.pdf_router"):
-            router._merge_pages([_TEXT_MARKDOWN, _TABLE_MARKDOWN], "test.pdf")
-
+        captured = capsys.readouterr()
         diagnostic_lines = [
-            line for line in caplog.messages
+            line for line in captured.out.splitlines()
             if line.startswith("HEADING ") or line.startswith("ORPHAN-CHECK ")
         ]
         assert diagnostic_lines == [], (
-            f"Diagnostic log lines must NOT appear when PDF_DEBUG_HEADING_DUMP is unset. "
+            f"Diagnostic lines must NOT appear when PDF_DEBUG_HEADING_DUMP is unset. "
             f"Got: {diagnostic_lines}"
         )
 
-    def test_heading_log_lines_emitted_when_enabled(self, caplog):
+    def test_heading_log_lines_emitted_when_enabled(self, capsys):
         """When PDF_DEBUG_HEADING_DUMP is patched to True, at least one HEADING
-        log line must be emitted for a page that contains a heading.
+        line must be printed to stdout for a page that contains a heading.
 
         This validates the diagnostic code path is actually reachable.
         """
         router = PdfPageRouter()
 
-        # Temporarily override settings.pdf_debug_heading_dump to True
         from config import settings as real_settings
         patched_settings = Settings(
             **{
@@ -173,12 +171,14 @@ class TestDebugHeadingDumpDefaultOff:
             }
         )
 
-        with patch("parsers.pdf_router.settings", patched_settings), \
-             caplog.at_level(logging.INFO, logger="parsers.pdf_router"):
+        with patch("parsers.pdf_router.settings", patched_settings):
             router._merge_pages([_TEXT_MARKDOWN], "test.pdf")
 
-        heading_lines = [l for l in caplog.messages if l.startswith("HEADING ")]
+        captured = capsys.readouterr()
+        heading_lines = [
+            l for l in captured.out.splitlines() if l.startswith("HEADING ")
+        ]
         assert len(heading_lines) >= 1, (
-            "At least one HEADING log line must appear when pdf_debug_heading_dump=True "
+            "At least one HEADING line must be printed when pdf_debug_heading_dump=True "
             "and the input contains a SECTION_HEADER item."
         )

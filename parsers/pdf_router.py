@@ -518,10 +518,10 @@ class PdfPageRouter(BaseParser):
         _repair_pdf_headings(combined)
 
         # v5.4 Diagnostic A+B — gated behind PDF_DEBUG_HEADING_DUMP=1 (default off).
-        # Diagnostic A: log level of each SECTION_HEADER to test the heading-level
+        # Diagnostic A: print level of each SECTION_HEADER to settle the heading-level
         #   hypothesis (promoted headings may all share a wrong default level, causing
         #   HybridChunker to not advance heading context across them).
-        # Diagnostic B: log flat-list index of known orphan items to determine whether
+        # Diagnostic B: print flat-list index of known orphan items to determine whether
         #   the ordering bug is in add_document()'s append order or in downstream
         #   tree-traversal by HybridChunker / export_to_markdown().
         if settings.pdf_debug_heading_dump:
@@ -530,9 +530,8 @@ class PdfPageRouter(BaseParser):
                     text_preview = (item.text or "")[:40]
                     level = getattr(item, "level", "<no level attr>")
                     page_no = item.prov[0].page_no if item.prov else None
-                    logger.info(
-                        "HEADING page=%s level=%s text=%r",
-                        page_no, level, text_preview,
+                    print(  # noqa: T201 — intentional debug output, gated by flag
+                        f"HEADING page={page_no} level={level!r} text={text_preview!r}"
                     )
             total = len(combined.texts)
             orphan_markers = ("Advanced Circuit", "CONTENTS", "FULUOURIMEY", "Animal Protein")
@@ -540,9 +539,8 @@ class PdfPageRouter(BaseParser):
                 text_preview = (item.text or "")[:30]
                 if any(marker in text_preview for marker in orphan_markers):
                     page_no = item.prov[0].page_no if item.prov else None
-                    logger.info(
-                        "ORPHAN-CHECK index=%d/%d page=%s text=%r",
-                        idx, total, page_no, text_preview,
+                    print(  # noqa: T201 — intentional debug output, gated by flag
+                        f"ORPHAN-CHECK index={idx}/{total} page={page_no} text={text_preview!r}"
                     )
 
         # v5.3 _flatten_document() was reverted in v5.4 — it silently dropped
