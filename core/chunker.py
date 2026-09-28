@@ -241,17 +241,30 @@ class Chunker:
                         page = item.prov[0].page_no
                 except (AttributeError, IndexError, TypeError):
                     pass
-                metadatas.append(
-                    {
-                        "document_id": file_id,
-                        "file_id": file_id,
-                        "filename": filename,
-                        "page": page,
-                        "page_numbers": [page] if page is not None else [],
-                        "chunk_index": len(metadatas),
-                    }
-                )
-                chunks.append(heading_text)
+                synthetic_meta = {
+                    "document_id": file_id,
+                    "file_id": file_id,
+                    "filename": filename,
+                    "page": page,
+                    "page_numbers": [page] if page is not None else [],
+                    "chunk_index": len(metadatas),
+                }
+                # v5.5 Fix B: insert at the end of the heading's own page instead
+                # of appending at the tail (the "orphan chunks at end" bug).
+                # Diagnostic B confirmed doc.texts order was correct; the bug was
+                # purely that this loop always called .append() regardless of page.
+                insert_at = len(chunks)
+                if page is not None:
+                    for idx, m in enumerate(metadatas):
+                        mp = m.get("page")
+                        if mp is not None and mp > page:
+                            insert_at = idx
+                            break
+                metadatas.insert(insert_at, synthetic_meta)
+                chunks.insert(insert_at, heading_text)
+
+        for idx, m in enumerate(metadatas):  # keep chunk_index == list position
+            m["chunk_index"] = idx
 
         if not chunks:
             raise ValueError(f"File {filename} does not contain extractable text")

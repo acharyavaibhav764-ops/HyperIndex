@@ -56,6 +56,26 @@ cross-page nesting which caused HybridChunker's heading context to freeze
 (items' parent refs stayed anchored to stale per-page sub-tree roots) and
 orphaned items to land at the document tail. This unified fix resolves both
 Issue 2 (heading freeze) and Issue 4 (tail ordering) in one step.
+
+v5.5 notes
+----------
+Two root causes confirmed by the Diagnostic A/B evidence collected in v5.4:
+
+A. **Heading freeze**: pymupdf4llm re-runs its font-size→markdown-hashes
+   heuristic independently per page, so a sub-section heading that happens to
+   be the largest font on its page is emitted as '# ' → TitleItem (level 0
+   in HierarchicalChunker).  Level 0 is never cleared by any SectionHeader
+   (level >= 1) until the next TitleItem arrives — producing the observed
+   freeze.  Diagnostic A missed this because it only printed SECTION_HEADER.
+   Fix: _repair_pdf_headings() now converts every TITLE item to a
+   SectionHeaderItem with a deterministic level derived from numbering depth.
+
+B. **Tail orphans**: core/chunker.py's "Gap B" loop was appending
+   heading-only synthetic chunks at the END of the list regardless of their
+   page provenance.  Diagnostic B confirmed doc.texts order was always
+   correct (orphans at correct flat-list indices) — the bug was purely in
+   the append-vs-insert decision.  Fix: insert at the position after all
+   earlier-page chunks instead of always appending.
 """
 import logging
 import re
@@ -84,6 +104,12 @@ logger = logging.getLogger(__name__)
 # Matches standard technical-doc numbered headings: "7.6 Specificity", "9.4.2 Proteins"
 # Groups: one or more digit-dot segments followed by a non-whitespace word.
 _NUMBERED_HEADING_RE = re.compile(r"^\d+(\.\d+){0,3}\s+\S")
+
+# v5.5: stricter pattern used ONLY to promote body text to a heading.  Docling's MD
+# backend labels plain paragraphs TEXT (not PARAGRAPH), so promotion must accept TEXT;
+# but the loose regex above would then turn "3 sets of 10 reps" into a heading.
+# Require a dotted number ("7.3", "9.4.2") followed by a capitalised word.
+_PROMOTABLE_HEADING_RE = re.compile(r"^\d+\.\d+(\.\d+){0,2}\s+[A-Z]")
 
 
 def _repair_pdf_headings(
@@ -129,7 +155,7 @@ def _repair_pdf_headings(
         t for t, pages in pages_seen_on.items() if len(pages) >= threshold
     }
 
-    # Pass 2 — demote boilerplate, promote numbered headings
+    # Pass 2 — demote boilerplate, normalise heading type/level, promote numbered paragraphs
     for i, item in enumerate(doc.texts):
         stripped = (item.text or "").strip()
         if not stripped:
@@ -148,15 +174,76 @@ def _repair_pdf_headings(
             doc.texts[i] = TextItem(**{k: v for k, v in dump.items() if k in text_fields})
             continue
 
-        # Promote numbered paragraphs to section headers
+        # v5.5 Fix A: normalise EVERY heading to a SectionHeaderItem with a
+        # deterministic level.  pymupdf4llm is called once per page, so its
+        # font-size → '#'/'##'/'###' mapping is recomputed per page: a sub-section
+        # heading that is the largest font on its page becomes '# ' → TitleItem,
+        # which HierarchicalChunker treats as level 0 and never clears until the
+        # next TitleItem (the "5.5 Mobility" freeze).  Numbered headings get their
+        # level from numbering depth ("7" → 1, "7.3" → 2, "7.3.1" → 3).
+        if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE):
+            current = getattr(item, "level", None)
+            level = _heading_level(stripped, current)
+            if item.label == DocItemLabel.TITLE or current != level:
+                doc.texts[i] = _as_section_header(item, level)
+            continue
+
+        # Promote numbered paragraphs/text items to section headers.
+        # v5.5: accept TEXT label (docling's MD parser labels paragraphs TEXT,
+        # not PARAGRAPH — the old PARAGRAPH-only check was dead code against
+        # the markdown-converted path).  Use stricter _PROMOTABLE_HEADING_RE
+        # so "3 sets of 10 reps" is never promoted.
         if (
-            item.label == DocItemLabel.PARAGRAPH
-            and len(stripped) < 100
-            and _NUMBERED_HEADING_RE.match(stripped)
+            item.label in (DocItemLabel.PARAGRAPH, DocItemLabel.TEXT)
+            and len(stripped) < 80
+            and not stripped.endswith(("." , ",", ";", ":"))
+            and _PROMOTABLE_HEADING_RE.match(stripped)
         ):
-            dump = item.model_dump()
-            dump["label"] = DocItemLabel.SECTION_HEADER
-            doc.texts[i] = SectionHeaderItem(**dump)
+            doc.texts[i] = _as_section_header(item, _heading_level(stripped, None))
+
+
+def _heading_level(text: str, current: int | None) -> int:
+    """Return the chunker heading level (>=1) for a heading.
+
+    Numbered headings derive level from numbering depth:
+      - "7" → 1 (no dots)
+      - "7.3" → 2 (one dot)
+      - "7.3.1" → 3 (two dots)
+
+    Unnumbered headings keep their existing SectionHeader level, defaulting
+    to 1.  Level 0 is never returned — that is the document-title slot in
+    HierarchicalChunker and is only cleared by another TitleItem.
+
+    Args:
+        text:    Stripped heading text.
+        current: Existing ``level`` attribute value, or None if absent.
+
+    Returns:
+        int: Level >= 1.
+    """
+    if _NUMBERED_HEADING_RE.match(text):
+        return text.split()[0].count(".") + 1
+    return max(current or 1, 1)
+
+
+def _as_section_header(item, level: int) -> SectionHeaderItem:
+    """Rebuild any text-like item as a SectionHeaderItem at ``level``.
+
+    Preserves self_ref, parent, prov and text so the item stays correctly
+    wired into the document tree — only label and level change.
+
+    Args:
+        item:  Original TextItem / SectionHeaderItem / TitleItem.
+        level: Target heading level (>= 1).
+
+    Returns:
+        SectionHeaderItem: Drop-in replacement with corrected label/level.
+    """
+    dump = item.model_dump()
+    dump["label"] = DocItemLabel.SECTION_HEADER
+    dump["level"] = level
+    fields = SectionHeaderItem.model_fields.keys()
+    return SectionHeaderItem(**{k: v for k, v in dump.items() if k in fields})
 
 
 def _flatten_document(doc: DoclingDocument) -> DoclingDocument:
