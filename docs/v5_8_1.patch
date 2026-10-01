@@ -1,0 +1,63 @@
+diff -ruN a2/core/chunk_cleanup.py b2/core/chunk_cleanup.py
+--- a2/core/chunk_cleanup.py	2026-10-01 07:10:44.116441206 +0000
++++ b2/core/chunk_cleanup.py	2026-10-01 07:10:44.576011253 +0000
+@@ -27,6 +27,12 @@
+     return re.sub(r"\s+", " ", strip_markup(s)).strip().casefold()
+ 
+ 
++def is_micro_label(text: str) -> bool:
++    """One short line of <= 3 words with no digits (a running logo such as 'Calisthenics Family')."""
++    t = text.strip()
++    return "\n" not in t and len(t) < 40 and len(t.split()) <= 3 and not re.search(r"\d", t)
++
++
+ def postprocess_chunks(
+     chunks: list[str], metas: list[dict[str, Any]], *, drop_micro: bool = False
+ ) -> tuple[list[str], list[dict[str, Any]]]:
+@@ -44,8 +50,7 @@
+         if nxt and norms and norms <= nxt:         # only headings left, and the next chunk has them
+             continue
+         text = "\n".join(ls).strip()
+-        if drop_micro and "\n" not in text and len(text) < 40 and len(text.split()) <= 3 \
+-                and not re.search(r"\d", text):
++        if drop_micro and is_micro_label(text):
+             continue                               # e.g. a lone running logo 'Calisthenics Family'
+         out_chunks.append(text)
+         out_metas.append(metas[i])
+diff -ruN a2/core/chunker.py b2/core/chunker.py
+--- a2/core/chunker.py	2026-10-01 07:10:44.116537156 +0000
++++ b2/core/chunker.py	2026-10-01 07:10:44.576055853 +0000
+@@ -11,7 +11,7 @@
+ from langchain_text_splitters import RecursiveCharacterTextSplitter
+ 
+ from config import settings
+-from core.chunk_cleanup import postprocess_chunks  # v5.8
++from core.chunk_cleanup import is_micro_label, postprocess_chunks  # v5.8
+ 
+ 
+ class _MarkdownTableChunkSerializer(ChunkingDocSerializer):
+@@ -269,6 +269,11 @@
+                 continue
+             heading_text = (item.text or "").strip()
+             if heading_text and heading_text not in covered_headings:
++                # v5.8.1: a PDF heading item with no body and no place in any heading path is a
++                # running logo/label (e.g. 'Calisthenics Family' on the last page), not a section.
++                if settings.chunk_postprocess and filename.lower().endswith(".pdf") \
++                        and is_micro_label(heading_text):
++                    continue
+                 # Page provenance for synthetic heading chunks
+                 page: int | None = None
+                 try:
+diff -ruN a2/tests/parsing_arch/v5_8/test_v58_repairs.py b2/tests/parsing_arch/v5_8/test_v58_repairs.py
+--- a2/tests/parsing_arch/v5_8/test_v58_repairs.py	2026-10-01 07:10:44.117283991 +0000
++++ b2/tests/parsing_arch/v5_8/test_v58_repairs.py	2026-10-01 07:10:44.576162959 +0000
+@@ -83,3 +83,9 @@
+ 
+ def test_known_fix_timeline_heading():
+     assert pc.apply_known_fixes("THEFULLJOURNEYTIMELINE") == "THE FULL JOURNEY TIMELINE"
++
++
++def test_is_micro_label():
++    assert cc.is_micro_label("Calisthenics Family")
++    assert not cc.is_micro_label("10.2 The Full Journey")
++    assert not cc.is_micro_label("Two\nlines")

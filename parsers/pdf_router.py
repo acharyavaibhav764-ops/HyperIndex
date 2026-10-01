@@ -76,6 +76,36 @@ B. **Tail orphans**: core/chunker.py's "Gap B" loop was appending
    correct (orphans at correct flat-list indices) — the bug was purely in
    the append-vs-insert decision.  Fix: insert at the position after all
    earlier-page chunks instead of always appending.
+
+v5.6 notes
+----------
+_extract_misplaced_number() handles headings whose section number pymupdf4llm
+extracted out of position ("Greasing 6.4 the Groove", "Strength & Skill
+Routine 5.7") instead of leading ("6.4 Greasing the Groove") -- v5.5's
+_heading_level() only ever looked at the first word, so these fell back to a
+flat level 1 and stopped clearing the heading stack correctly.
+The empty-text branch of _repair_pdf_headings()'s main loop no longer
+skips empty-text SECTION_HEADER/TITLE items outright (v5.5's `if not
+stripped: continue` silently left them at whatever level the per-page
+parser gave them, including level 0); they are now emptied into harmless
+TEXT items like any other dropped fragment.
+_split_embedded_headings() is a post-repair pass for heading text that
+never became its own DocItem: some heading text is *duplicated* verbatim as
+literal "### **text**" markdown syntax glued onto the tail of the preceding
+paragraph (marko never parses it as an ATX heading because it is not the
+first thing on its line) -- confirmed against a real-PDF run that every
+such fragment duplicates a heading that already exists correctly elsewhere,
+so the fix deletes the noise rather than creating a second heading. A
+narrower, separate heuristic in the same pass promotes a leading run of
+ALL-CAPS words in an ordinary paragraph ("10 CRUCIAL TRAINING PRINCIPLES...")
+that pymupdf4llm never '#'-detected at all, since it was not the single
+largest font on its page.
+Not attempted in v5.6 (see docs/v5_6_plan.md for why): CTA/bullet text
+mis-detected as a heading with no decidable textual marker (e.g. "Become a
+Master of Your Own Bodyweight"), table column-scrambling and duplicated
+Advanced/Beginner circuit tables, OCR text corruption, and the "Apply The 8
+80/20 Rule 66" heading (its real "9.9" numbering is not recoverable from the
+extracted text at all -- this is upstream data loss, not a formatting bug).
 """
 import logging
 import re
@@ -97,7 +127,12 @@ from docling_core.types.io import DocumentStream
 
 from config import settings
 from .base import BaseParser
-from .docling_parser import _build_vlm_converter, _inject_picture_descriptions
+from .docling_parser import (
+    _build_text_layer_converter,
+    _build_vlm_converter,
+    _inject_picture_descriptions,
+)
+from . import pdf_cleanup, pdf_structure  # v5.7
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +145,25 @@ _NUMBERED_HEADING_RE = re.compile(r"^\d+(\.\d+){0,3}\s+\S")
 # but the loose regex above would then turn "3 sets of 10 reps" into a heading.
 # Require a dotted number ("7.3", "9.4.2") followed by a capitalised word.
 _PROMOTABLE_HEADING_RE = re.compile(r"^\d+\.\d+(\.\d+){0,2}\s+[A-Z]")
+
+# v5.6 Fix A: a dotted section number ANYWHERE in a heading string, used to find
+# one that pymupdf4llm extracted out of position (not as the leading token).
+_SECTION_NUMBER_TOKEN_RE = re.compile(r"\d+\.\d+(?:\.\d+){0,2}")
+
+# v5.6 Fix C: a markdown ATX-heading fragment ("### **text**") glued onto the
+# tail of a paragraph because it wasn't the first thing on its own line, so
+# marko's block parser never split it into a real heading node.
+_EMBEDDED_MD_HEADING_RE = re.compile(
+    r"(?:\n|^|\s{2,})\s*#{1,6}\s*\*{0,2}(?P<htext>[^\n*]+?)\*{0,2}\s*\Z"
+)
+
+# v5.6 Fix D: a leading run of 2-7 ALL-CAPS/number tokens immediately followed
+# by normal-case prose -- a chapter-style heading pymupdf4llm never '#'-detected
+# because it wasn't the single largest font on its page. Narrow and heuristic;
+# supports optional markdown bold on the heading itself.
+_LEADING_ALLCAPS_RE = re.compile(
+    r"^\*{0,2}(?P<caps>[A-Z0-9][A-Z0-9&/]*(?:\s+[A-Z0-9][A-Z0-9&/]*){1,6})\*{0,2}\s+(?=[A-Z][a-z])"
+)
 
 
 def _repair_pdf_headings(
@@ -158,6 +212,23 @@ def _repair_pdf_headings(
     # Pass 2 — demote boilerplate, normalise heading type/level, promote numbered paragraphs
     for i, item in enumerate(doc.texts):
         stripped = (item.text or "").strip()
+
+        # v5.6 Fix B: an empty-text heading item is not a demotion candidate (it
+        # matches nothing in `boilerplate`) and isn't a real heading either --
+        # v5.5 skipped it via the blanket "if not stripped: continue" below, so
+        # it kept whatever level the per-page parser gave it, including level 0
+        # (HierarchicalChunker's document-title slot), where it would silently
+        # reset any heading in progress the next time the traversal reached it.
+        # Emptying it into a plain TextItem makes it inert instead: the doc
+        # serializer emits empty text for it, so HierarchicalChunker's own
+        # `if not ser_res.text: continue` drops it from chunk output entirely.
+        if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE) and not stripped:
+            dump = item.model_dump()
+            dump["label"] = DocItemLabel.TEXT
+            text_fields = TextItem.model_fields.keys()
+            doc.texts[i] = TextItem(**{k: v for k, v in dump.items() if k in text_fields})
+            continue
+
         if not stripped:
             continue
 
@@ -183,9 +254,19 @@ def _repair_pdf_headings(
         # level from numbering depth ("7" → 1, "7.3" → 2, "7.3.1" → 3).
         if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE):
             current = getattr(item, "level", None)
-            level = _heading_level(stripped, current)
-            if item.label == DocItemLabel.TITLE or current != level:
-                doc.texts[i] = _as_section_header(item, level)
+            # v5.6 Fix A: the section number pymupdf4llm found is sometimes not
+            # the heading's leading token ("Greasing 6.4 the Groove", "Strength
+            # & Skill Routine 5.7") -- _heading_level() only ever looks at the
+            # first word, so these fell back to a flat level 1. Relocate the
+            # number to the front and derive level from it before that fallback.
+            relocated = _extract_misplaced_number(stripped)
+            if relocated is not None:
+                new_text, level = relocated
+                doc.texts[i] = _as_section_header(item, level, text=new_text)
+            else:
+                level = _heading_level(stripped, current)
+                if item.label == DocItemLabel.TITLE or current != level:
+                    doc.texts[i] = _as_section_header(item, level)
             continue
 
         # Promote numbered paragraphs/text items to section headers.
@@ -200,6 +281,9 @@ def _repair_pdf_headings(
             and _PROMOTABLE_HEADING_RE.match(stripped)
         ):
             doc.texts[i] = _as_section_header(item, _heading_level(stripped, None))
+
+    # v5.6 Fix C + Fix D — heading text that never became its own DocItem.
+    _split_embedded_headings(doc)
 
 
 def _heading_level(text: str, current: int | None) -> int:
@@ -226,7 +310,7 @@ def _heading_level(text: str, current: int | None) -> int:
     return max(current or 1, 1)
 
 
-def _as_section_header(item, level: int) -> SectionHeaderItem:
+def _as_section_header(item, level: int, text: str | None = None) -> SectionHeaderItem:
     """Rebuild any text-like item as a SectionHeaderItem at ``level``.
 
     Preserves self_ref, parent, prov and text so the item stays correctly
@@ -235,6 +319,8 @@ def _as_section_header(item, level: int) -> SectionHeaderItem:
     Args:
         item:  Original TextItem / SectionHeaderItem / TitleItem.
         level: Target heading level (>= 1).
+        text:  If given, replaces the item's text (v5.6 Fix A: relocating a
+               misplaced section number rewrites the string, not just the level).
 
     Returns:
         SectionHeaderItem: Drop-in replacement with corrected label/level.
@@ -242,8 +328,120 @@ def _as_section_header(item, level: int) -> SectionHeaderItem:
     dump = item.model_dump()
     dump["label"] = DocItemLabel.SECTION_HEADER
     dump["level"] = level
+    if text is not None:
+        dump["text"] = text
     fields = SectionHeaderItem.model_fields.keys()
     return SectionHeaderItem(**{k: v for k, v in dump.items() if k in fields})
+
+
+def _extract_misplaced_number(text: str) -> tuple[str, int] | None:
+    """Find a dotted section number embedded in a heading string and move it to the front.
+
+    pymupdf4llm's per-page heading detection uses raw text-block reading order.
+    When a section number is typeset as a separate design element positioned
+    near a heading -- rather than literally being the heading's first word --
+    it ends up interleaved into the extracted string at whatever position the
+    page's reading order put it: "Greasing 6.4 the Groove", "Circuit t Training
+    6.5", "Strength & Skill Routine 5.7". _heading_level() only ever inspects
+    the first word, so these all fell back to a flat, undifferentiated level 1.
+
+    Deliberately conservative: only acts when exactly one dotted-number token
+    is found and it is not already leading (ignoring markdown formatting or
+    punctuation before the number). Zero or multiple candidates are
+    ambiguous and are left for a human / a future pass rather than guessed at.
+    A single *un-dotted* trailing number (e.g. a stray page-number digit) never
+    matches _SECTION_NUMBER_TOKEN_RE at all, so it is never touched here --
+    see docs/v5_6_plan.md for the "Apply The 8 80/20 Rule 66" case this misses.
+
+    Args:
+        text: Stripped heading text.
+
+    Returns:
+        ``(new_text, level)`` with the number relocated to the front, or
+        ``None`` if the text doesn't contain exactly one relocatable number.
+    """
+    matches = list(_SECTION_NUMBER_TOKEN_RE.finditer(text))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    if not any(c.isalnum() for c in text[: match.start()]):
+        return None  # already leading; nothing to relocate
+    number = match.group(0)
+    remainder = (text[: match.start()] + " " + text[match.end() :]).strip()
+    remainder = re.sub(r"\s{2,}", " ", remainder)
+    if not remainder:
+        return None
+    return f"{number} {remainder}", number.count(".") + 1
+
+
+def _split_embedded_headings(doc: DoclingDocument) -> None:
+    """Handle heading text that pymupdf4llm never turned into its own DocItem.
+
+    Two unrelated phenomena share a symptom (heading-shaped text stuck inside
+    an ordinary PARAGRAPH/TEXT item) but need opposite fixes:
+
+    **Fix C — duplicate noise, delete it.** Some pages' markdown repeats a
+    heading's text a second time as a literal "### **text**" fragment glued
+    onto the tail of the *preceding* paragraph. marko's block parser only
+    recognises an ATX heading when '#' starts its own line, so this fragment
+    never became a heading node -- but the *real* heading, correctly typed,
+    already exists elsewhere in the document (confirmed for every instance
+    found in the real-PDF run this was built against; see docs/v5_6_plan.md).
+    Creating a second heading node for it would just duplicate the heading
+    path, so this strips the fragment instead of promoting it.
+
+    **Fix D — genuinely missing heading, promote it.** A handful of
+    chapter-style headings are never '#'-detected at all, because they are
+    not the single largest font on their page (e.g. a large decorative
+    numeral sits beside modest-sized bold chapter text). These survive only
+    as **bold** text at the start of an ordinary paragraph, with no
+    corresponding heading item anywhere in the document. A narrow pattern --
+    a leading run of ALL-CAPS/number tokens immediately followed by
+    normal-case prose -- is promoted into a real SectionHeaderItem via
+    doc.insert_heading(), which correctly reorders doc.body.children without
+    disturbing any existing item's self_ref (self_ref is positional in
+    docling-core; a naive doc.texts.insert() would silently invalidate every
+    ref after the insertion point).
+
+    Args:
+        doc: Fully-merged DoclingDocument.
+    """
+    heading_texts = {
+        (item.text or "").strip()
+        for item in doc.texts
+        if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE)
+        and (item.text or "").strip()
+    }
+
+    for item in list(doc.texts):
+        if item.label not in (DocItemLabel.PARAGRAPH, DocItemLabel.TEXT):
+            continue
+        text = item.text or ""
+
+        # Fix C: strip a trailing "### **text**" fragment that duplicates a
+        # heading that already exists as its own item elsewhere.
+        dup_match = _EMBEDDED_MD_HEADING_RE.search(text)
+        if dup_match and dup_match.group("htext").strip() in heading_texts:
+            text = text[: dup_match.start()].rstrip()
+            item.text = text
+
+        # Fix D: promote a leading ALL-CAPS run pymupdf4llm never '#'-detected.
+        stripped = text.strip()
+        caps_match = _LEADING_ALLCAPS_RE.match(stripped)
+        if caps_match and len(caps_match.group("caps")) >= 8:
+            heading_text = caps_match.group("caps")
+            if heading_text not in heading_texts:
+                item.text = stripped[caps_match.end() :].strip()
+                if stripped.startswith("**") and item.text.endswith("**") and not item.text.startswith("**"):
+                    item.text = item.text[:-2].strip()
+                doc.insert_heading(
+                    sibling=item,
+                    text=heading_text,
+                    level=1,
+                    prov=item.prov[0] if item.prov else None,
+                    after=False,
+                )
+                heading_texts.add(heading_text)
 
 
 def _flatten_document(doc: DoclingDocument) -> DoclingDocument:
@@ -299,6 +497,12 @@ class PdfPageRouter(BaseParser):
     def __init__(self) -> None:
         self._docling_converter: DocumentConverter | None = None
         self._vlm_converter: DocumentConverter | None = None
+        # v5.7: OCR-free converters for pages that carry a text layer, and the
+        # document vocabulary used by the text repair passes.
+        self._text_layer_converter: DocumentConverter | None = None
+        self._vlm_converter_text: DocumentConverter | None = None
+        self._vocab = None
+        self._ocr_pages: set[int] = set()
 
     # ------------------------------------------------------------------
     # BaseParser interface
@@ -334,13 +538,22 @@ class PdfPageRouter(BaseParser):
         pdf = fitz.open(stream=file_bytes, filetype="pdf")
         page_markdowns: list[str] = []
 
+        # v5.7: vocabulary from the PDF's own text layer + which pages have one.
+        page_texts = [p.get_text() for p in pdf]
+        self._vocab = pdf_cleanup.build_vocab(page_texts)
+        self._ocr_pages = {
+            i for i, t in enumerate(page_texts)
+            if settings.pdf_ocr_on_text_pages or len(t.strip()) < settings.pdf_text_layer_min_chars
+        }
+
         for page in pdf:
             routes = self._triage_page(page)
             logger.debug("Page %d → routes=%s", page.number, routes)
+            use_ocr = page.number in self._ocr_pages
 
             if routes == ["text"]:
                 # Fast path: no tables or images — plain PyMuPDF4LLM extraction
-                page_markdowns.append(pymupdf4llm.to_markdown(pdf, pages=[page.number]))
+                page_markdowns.append(self._page_markdown(pdf, page.number, use_ocr))
                 continue
 
             # Heavy path: at least one of table / image
@@ -348,17 +561,17 @@ class PdfPageRouter(BaseParser):
             parts: list[str] = []
 
             if "table" in routes:
-                parts.append(self._docling_page(single_bytes, filename, page.number))
+                parts.append(self._docling_page(single_bytes, filename, page.number, use_ocr))
 
             if "image" in routes:
                 if "table" in routes:
                     # Table content already captured above; add only picture captions
                     # to avoid duplicating the body text.
                     parts.append(
-                        self._picture_descriptions_only(single_bytes, filename, page.number)
+                        self._picture_descriptions_only(single_bytes, filename, page.number, use_ocr)
                     )
                 else:
-                    parts.append(self._smolvlm_page(single_bytes, filename, page.number))
+                    parts.append(self._smolvlm_page(single_bytes, filename, page.number, use_ocr))
 
             page_markdowns.append("\n\n".join(p for p in parts if p))
 
@@ -427,7 +640,27 @@ class PdfPageRouter(BaseParser):
     # Per-tier extractors
     # ------------------------------------------------------------------
 
-    def _docling_full(self, file_bytes: bytes, filename: str) -> DoclingDocument:
+    @staticmethod
+    def _page_markdown(pdf: "fitz.Document", page_no: int, use_ocr: bool) -> str:
+        """v5.7: pymupdf4llm markdown for one page, without running footers or OCR.
+
+        ``header=False, footer=False`` drops the page-furniture blocks; ``use_ocr=False``
+        keeps pymupdf4llm from re-OCRing a page that already has a text layer.  Older
+        pymupdf4llm builds reject unknown keyword arguments, so we degrade gracefully.
+        """
+        attempts = (
+            {"header": False, "footer": False, "use_ocr": use_ocr},
+            {"header": False, "footer": False},
+            {},
+        )
+        for kw in attempts:
+            try:
+                return pymupdf4llm.to_markdown(pdf, pages=[page_no], **kw)
+            except TypeError:
+                continue
+        return pymupdf4llm.to_markdown(pdf, pages=[page_no])
+
+    def _docling_full(self, file_bytes: bytes, filename: str, use_ocr: bool = True) -> DoclingDocument:
         """Full-document Docling conversion.
 
         Used as the fallback path when enable_pdf_page_router is False,
@@ -440,13 +673,29 @@ class PdfPageRouter(BaseParser):
         Returns:
             DoclingDocument: Converted document.
         """
-        if self._docling_converter is None:
-            self._docling_converter = DocumentConverter()
+        if use_ocr:
+            if self._docling_converter is None:
+                self._docling_converter = DocumentConverter()
+            converter = self._docling_converter
+        else:                                    # v5.7: trust the text layer
+            if self._text_layer_converter is None:
+                self._text_layer_converter = _build_text_layer_converter()
+            converter = self._text_layer_converter
         stream = DocumentStream(name=filename, stream=BytesIO(file_bytes))
-        result = self._docling_converter.convert(stream)
+        result = converter.convert(stream)
         return result.document
 
-    def _docling_page(self, file_bytes: bytes, filename: str, page_no: int) -> str:
+    def _vlm_for(self, use_ocr: bool) -> DocumentConverter:
+        """v5.7: cached VLM converter, OCR-free when the page has a text layer."""
+        if use_ocr:
+            if self._vlm_converter is None:
+                self._vlm_converter = _build_vlm_converter()
+            return self._vlm_converter
+        if self._vlm_converter_text is None:
+            self._vlm_converter_text = _build_vlm_converter(do_ocr=False)
+        return self._vlm_converter_text
+
+    def _docling_page(self, file_bytes: bytes, filename: str, page_no: int, use_ocr: bool = True) -> str:
         """Extract a table-bearing page via Docling and return its markdown.
 
         Receives single-page PDF bytes produced by _single_page_bytes(), so
@@ -461,10 +710,10 @@ class PdfPageRouter(BaseParser):
         Returns:
             str: Markdown string for the page's content.
         """
-        doc = self._docling_full(file_bytes, filename)
+        doc = self._docling_full(file_bytes, filename, use_ocr)
         return doc.export_to_markdown()
 
-    def _smolvlm_page(self, file_bytes: bytes, filename: str, page_no: int) -> str:
+    def _smolvlm_page(self, file_bytes: bytes, filename: str, page_no: int, use_ocr: bool = True) -> str:
         """Describe an image-heavy page using SmolVLM via Docling VLM pipeline.
 
         Reuses ``_build_vlm_converter()`` from docling_parser — the same
@@ -487,10 +736,8 @@ class PdfPageRouter(BaseParser):
             str: Markdown string with figure descriptions injected.
         """
         try:
-            if self._vlm_converter is None:
-                self._vlm_converter = _build_vlm_converter()
             stream = DocumentStream(name=filename, stream=BytesIO(file_bytes))
-            doc = self._vlm_converter.convert(stream).document
+            doc = self._vlm_for(use_ocr).convert(stream).document
             # v5.3 Fix 1: run the same cleanup+tagging pass used by
             # _picture_descriptions_only() — strips dangling SmolVLM completion
             # tokens (e.g. "<end_of_utteranc") and prefixes descriptions with
@@ -509,7 +756,7 @@ class PdfPageRouter(BaseParser):
             return md
 
     def _picture_descriptions_only(
-        self, file_bytes: bytes, filename: str, page_no: int
+        self, file_bytes: bytes, filename: str, page_no: int, use_ocr: bool = True
     ) -> str:
         """Extract SmolVLM picture-description captions for a page that also has a table.
 
@@ -532,10 +779,8 @@ class PdfPageRouter(BaseParser):
                  failure.
         """
         try:
-            if self._vlm_converter is None:
-                self._vlm_converter = _build_vlm_converter()
             stream = DocumentStream(name=filename, stream=BytesIO(file_bytes))
-            doc = self._vlm_converter.convert(stream).document
+            doc = self._vlm_for(use_ocr).convert(stream).document
             _inject_picture_descriptions(doc)
             return "\n\n".join(
                 item.text
@@ -581,6 +826,14 @@ class PdfPageRouter(BaseParser):
         combined = DoclingDocument(name=filename.rsplit(".", 1)[0])
         converter = DocumentConverter(allowed_formats=[InputFormat.MD])
 
+        # v5.7: strip running footers, then clean each page's markdown (markup, glued
+        # words, picture-text debris, table normalisation) before Docling parses it.
+        if settings.pdf_v57_cleanup:
+            page_markdowns = pdf_cleanup.strip_running_lines(page_markdowns)
+            page_markdowns = [
+                pdf_cleanup.clean_page_markdown(md, self._vocab) for md in page_markdowns
+            ]
+
         for page_no, md in enumerate(page_markdowns, start=1):  # 1-indexed for humans
             stream = DocumentStream(
                 name=f"page_{page_no}.md",
@@ -604,6 +857,10 @@ class PdfPageRouter(BaseParser):
         # v5.2 Fix 2: repair heading labels corrupted by per-page independent parsing
         _repair_pdf_headings(combined)
 
+        # v5.7: document-level structure repair (pseudo-headings, captions, levels).
+        if settings.pdf_v57_cleanup:
+            pdf_structure.repair_pdf_structure(combined, self._vocab)
+
         # v5.4 Diagnostic A+B — gated behind PDF_DEBUG_HEADING_DUMP=1 (default off).
         # Diagnostic A: print level of each SECTION_HEADER to settle the heading-level
         #   hypothesis (promoted headings may all share a wrong default level, causing
@@ -613,12 +870,13 @@ class PdfPageRouter(BaseParser):
         #   tree-traversal by HybridChunker / export_to_markdown().
         if settings.pdf_debug_heading_dump:
             for item in combined.texts:
-                if item.label == DocItemLabel.SECTION_HEADER:
+                if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE):
                     text_preview = (item.text or "")[:40]
-                    level = getattr(item, "level", "<no level attr>")
+                    level = getattr(item, "level", "<TITLE=level0>")
                     page_no = item.prov[0].page_no if item.prov else None
                     print(  # noqa: T201 — intentional debug output, gated by flag
-                        f"HEADING page={page_no} level={level!r} text={text_preview!r}"
+                        f"HEADING page={page_no} label={item.label.value} "
+                        f"level={level!r} text={text_preview!r}"
                     )
             total = len(combined.texts)
             orphan_markers = ("Advanced Circuit", "CONTENTS", "FULUOURIMEY", "Animal Protein")

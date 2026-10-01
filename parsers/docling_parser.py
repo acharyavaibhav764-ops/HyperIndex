@@ -57,7 +57,20 @@ from .base import BaseParser
 logger = logging.getLogger(__name__)
 
 
-def _build_vlm_converter() -> DocumentConverter:
+def _build_text_layer_converter() -> DocumentConverter:
+    """v5.7: PDF converter that trusts the embedded text layer (no OCR).
+
+    Table structure recognition stays on; only the OCR stage is removed.
+    """
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+    opts = PdfPipelineOptions(do_ocr=False, do_table_structure=True)
+    return DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+    )
+
+
+def _build_vlm_converter(do_ocr: bool = True) -> DocumentConverter:
     """Build a DocumentConverter with picture description enabled.
 
     Uses PictureDescriptionVlmEngineOptions.from_preset() with the preset
@@ -82,7 +95,7 @@ def _build_vlm_converter() -> DocumentConverter:
 
     # Fix 3: honour the opt-out flag for PDF callers too, matching DoclingParser.parse()
     if not settings.enable_picture_description:
-        return DocumentConverter()
+        return DocumentConverter() if do_ocr else _build_text_layer_converter()
 
     try:
         picture_opts = PictureDescriptionVlmEngineOptions.from_preset(
@@ -114,6 +127,7 @@ def _build_vlm_converter() -> DocumentConverter:
     # SmolVLM's page-rasterisation path threw AttributeError on every PDF page,
     # silently falling back to PyMuPDF4LLM — meaning the VLM never actually ran.
     pdf_pipeline_options = PdfPipelineOptions(
+        do_ocr=do_ocr,               # v5.7: False for pages that have a text layer
         do_picture_classification=True,
         do_picture_description=True,
         picture_description_options=picture_opts,

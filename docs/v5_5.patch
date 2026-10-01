@@ -1,0 +1,276 @@
+diff --git a/core/chunker.py b/core/chunker.py
+--- a/core/chunker.py	2026-09-28 17:34:07.671870350 +0000
++++ b/core/chunker.py	2026-09-28 17:34:07.673546960 +0000
+@@ -241,17 +241,28 @@
+                         page = item.prov[0].page_no
+                 except (AttributeError, IndexError, TypeError):
+                     pass
+-                metadatas.append(
+-                    {
+-                        "document_id": file_id,
+-                        "file_id": file_id,
+-                        "filename": filename,
+-                        "page": page,
+-                        "page_numbers": [page] if page is not None else [],
+-                        "chunk_index": len(metadatas),
+-                    }
+-                )
+-                chunks.append(heading_text)
++                synthetic_meta = {
++                    "document_id": file_id,
++                    "file_id": file_id,
++                    "filename": filename,
++                    "page": page,
++                    "page_numbers": [page] if page is not None else [],
++                    "chunk_index": len(metadatas),
++                }
++                # v5.5 Fix B: insert at the end of the heading's own page instead of
++                # appending at the tail (the "orphan chunks at the end" bug).
++                insert_at = len(chunks)
++                if page is not None:
++                    for idx, m in enumerate(metadatas):
++                        mp = m.get("page")
++                        if mp is not None and mp > page:
++                            insert_at = idx
++                            break
++                metadatas.insert(insert_at, synthetic_meta)
++                chunks.insert(insert_at, heading_text)
++
++        for idx, m in enumerate(metadatas):  # keep chunk_index == list position
++            m["chunk_index"] = idx
+ 
+         if not chunks:
+             raise ValueError(f"File {filename} does not contain extractable text")
+diff --git a/parsers/pdf_router.py b/parsers/pdf_router.py
+--- a/parsers/pdf_router.py	2026-09-28 17:34:07.664060943 +0000
++++ b/parsers/pdf_router.py	2026-09-28 17:34:07.665640818 +0000
+@@ -85,6 +85,12 @@
+ # Groups: one or more digit-dot segments followed by a non-whitespace word.
+ _NUMBERED_HEADING_RE = re.compile(r"^\d+(\.\d+){0,3}\s+\S")
+ 
++# v5.5: stricter pattern used ONLY to promote body text to a heading.  Docling's MD
++# backend labels plain paragraphs TEXT (not PARAGRAPH), so promotion must accept TEXT;
++# but the loose regex above would then turn "3 sets of 10 reps" into a heading.
++# Require a dotted number ("7.3", "9.4.2") followed by a capitalised word.
++_PROMOTABLE_HEADING_RE = re.compile(r"^\d+\.\d+(\.\d+){0,2}\s+[A-Z]")
++
+ 
+ def _repair_pdf_headings(
+     doc: DoclingDocument,
+@@ -129,7 +135,7 @@
+         t for t, pages in pages_seen_on.items() if len(pages) >= threshold
+     }
+ 
+-    # Pass 2 — demote boilerplate, promote numbered headings
++    # Pass 2 — demote boilerplate, normalise heading type/level, promote numbered paragraphs
+     for i, item in enumerate(doc.texts):
+         stripped = (item.text or "").strip()
+         if not stripped:
+@@ -148,15 +154,49 @@
+             doc.texts[i] = TextItem(**{k: v for k, v in dump.items() if k in text_fields})
+             continue
+ 
++        # v5.5 Fix A: normalise EVERY heading to a SectionHeaderItem with a
++        # deterministic level.  pymupdf4llm is called once per page, so its
++        # font-size -> '#'/'##'/'###' mapping is recomputed per page: a sub-section
++        # heading that is the largest font on its page becomes '# ' -> TitleItem,
++        # which HierarchicalChunker treats as level 0 and never clears until the
++        # next TitleItem (the "5.5 Mobility" freeze).  Numbered headings get their
++        # level from numbering depth ("7" -> 1, "7.3" -> 2, "7.3.1" -> 3).
++        if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE):
++            current = getattr(item, "level", None)
++            level = _heading_level(stripped, current)
++            if item.label == DocItemLabel.TITLE or current != level:
++                doc.texts[i] = _as_section_header(item, level)
++            continue
++
+         # Promote numbered paragraphs to section headers
+         if (
+-            item.label == DocItemLabel.PARAGRAPH
+-            and len(stripped) < 100
+-            and _NUMBERED_HEADING_RE.match(stripped)
++            item.label in (DocItemLabel.PARAGRAPH, DocItemLabel.TEXT)
++            and len(stripped) < 80
++            and not stripped.endswith((".", ",", ";", ":"))
++            and _PROMOTABLE_HEADING_RE.match(stripped)
+         ):
+-            dump = item.model_dump()
+-            dump["label"] = DocItemLabel.SECTION_HEADER
+-            doc.texts[i] = SectionHeaderItem(**dump)
++            doc.texts[i] = _as_section_header(item, _heading_level(stripped, None))
++
++
++def _heading_level(text: str, current: int | None) -> int:
++    """Return the chunker heading level (>=1) for a heading.
++
++    Numbered headings derive level from numbering depth; unnumbered headings keep
++    their existing SectionHeader level, defaulting to 1 (never 0: level 0 is the
++    document-title slot in HierarchicalChunker and is only cleared by another title).
++    """
++    if _NUMBERED_HEADING_RE.match(text):
++        return text.split()[0].count(".") + 1
++    return max(current or 1, 1)
++
++
++def _as_section_header(item, level: int) -> SectionHeaderItem:
++    """Rebuild any text-like item as a SectionHeaderItem at ``level`` (same self_ref/parent)."""
++    dump = item.model_dump()
++    dump["label"] = DocItemLabel.SECTION_HEADER
++    dump["level"] = level
++    fields = SectionHeaderItem.model_fields.keys()
++    return SectionHeaderItem(**{k: v for k, v in dump.items() if k in fields})
+ 
+ 
+ def _flatten_document(doc: DoclingDocument) -> DoclingDocument:
+@@ -526,12 +566,13 @@
+         #   tree-traversal by HybridChunker / export_to_markdown().
+         if settings.pdf_debug_heading_dump:
+             for item in combined.texts:
+-                if item.label == DocItemLabel.SECTION_HEADER:
++                if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE):
+                     text_preview = (item.text or "")[:40]
+-                    level = getattr(item, "level", "<no level attr>")
++                    level = getattr(item, "level", "<TITLE=level0>")
+                     page_no = item.prov[0].page_no if item.prov else None
+                     print(  # noqa: T201 — intentional debug output, gated by flag
+-                        f"HEADING page={page_no} level={level!r} text={text_preview!r}"
++                        f"HEADING page={page_no} label={item.label.value} "
++                        f"level={level!r} text={text_preview!r}"
+                     )
+             total = len(combined.texts)
+             orphan_markers = ("Advanced Circuit", "CONTENTS", "FULUOURIMEY", "Animal Protein")
+diff --git a/tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py b/tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py
+--- a/tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py	2026-09-28 17:34:07.676963168 +0000
+@@ -0,0 +1,131 @@
++"""
++tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py
++
++v5.5 regression tests, built from the v5.4 diagnostic evidence.
++
++Root causes (reproduced offline with docling-core):
++  A. Heading freeze: pymupdf4llm runs per page, so a sub-section heading that is the
++     largest font on its page comes out as '# ' -> TitleItem.  HierarchicalChunker
++     keys its heading stack by level and treats TitleItem as level 0, which no
++     SectionHeader (level >= 1) can ever clear.  Diagnostic A missed it because it
++     only printed label == SECTION_HEADER.
++  B. Tail orphans: core/chunker.py's "Gap B" loop appended heading-only synthetic
++     chunks at the END of the chunk list.  The flat doc.texts order was always fine.
++"""
++import pytest
++from docling_core.types.doc import (
++    BoundingBox, DocItemLabel, DoclingDocument, ProvenanceItem,
++)
++from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
++
++from parsers.pdf_router import _repair_pdf_headings
++
++
++def _prov(n):
++    return [ProvenanceItem(page_no=n, bbox=BoundingBox(l=0, t=0, r=0, b=0), charspan=(0, 0))]
++
++
++def _page(n, spec):
++    d = DoclingDocument(name=f"p{n}")
++    for kind, txt in spec:
++        if kind == "title":
++            it = d.add_title(text=txt)
++        elif kind.startswith("h"):
++            it = d.add_heading(text=txt, level=int(kind[1]))
++        else:
++            it = d.add_text(label=DocItemLabel.TEXT, text=txt)
++        it.prov = _prov(n)
++    return d
++
++
++def _merged(pages):
++    combined = DoclingDocument(name="x")
++    for n, spec in enumerate(pages, 1):
++        combined.add_document(_page(n, spec))
++    return combined
++
++
++PAGES = [
++    [("title", "5.5 Mobility"), ("p", "mobility body")],
++    [("h1", "5.6 Structure"), ("p", "structure body")],
++    [("p", "7.3 Train Systematically"), ("p", "train body")],
++    [("h2", "7.4 Track Progress"), ("p", "track body")],
++    [("title", "7.10 Supercompensation"), ("p", "super body")],
++]
++
++
++def _headings_by_body(doc):
++    return {c.text: c.meta.headings for c in HierarchicalChunker().chunk(doc)}
++
++
++def test_bug_reproduced_without_repair():
++    """Sanity: the raw merged doc really exhibits the freeze."""
++    hb = _headings_by_body(_merged(PAGES))
++    assert "5.5 Mobility" in hb["track body"]
++
++
++def test_title_items_no_longer_freeze_heading_path():
++    doc = _merged(PAGES)
++    _repair_pdf_headings(doc)
++    hb = _headings_by_body(doc)
++    assert hb["mobility body"] == ["5.5 Mobility"]
++    assert hb["structure body"] == ["5.6 Structure"]
++    assert hb["train body"] == ["7.3 Train Systematically"]
++    assert hb["track body"] == ["7.4 Track Progress"]
++    assert hb["super body"] == ["7.10 Supercompensation"]
++
++
++def test_no_title_labels_remain_and_levels_follow_numbering():
++    doc = _merged(PAGES)
++    _repair_pdf_headings(doc)
++    assert not [t for t in doc.texts if t.label == DocItemLabel.TITLE]
++    levels = {t.text: t.level for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER}
++    assert set(levels.values()) == {2}           # all N.N -> level 2
++    doc2 = _merged([[("title", "7 Training"), ("p", "x"), ("p", "7.1.2 Deep dive"), ("p", "y")]])
++    _repair_pdf_headings(doc2)
++    lv = {t.text: t.level for t in doc2.texts if t.label == DocItemLabel.SECTION_HEADER}
++    assert lv == {"7 Training": 1, "7.1.2 Deep dive": 3}
++
++
++def test_unnumbered_title_becomes_level_1_not_0():
++    doc = _merged([[("title", "CONTENTS"), ("p", "body")]])
++    _repair_pdf_headings(doc)
++    h = [t for t in doc.texts if t.text == "CONTENTS"][0]
++    assert h.label == DocItemLabel.SECTION_HEADER and h.level == 1
++
++
++class _FakeHybrid:
++    """HybridChunker stand-in (real one needs a HF tokenizer download)."""
++    def __init__(self, **kw):
++        self._c = HierarchicalChunker()
++    def chunk(self, doc):
++        return self._c.chunk(doc)
++    def contextualize(self, chunk):
++        return "\n".join((chunk.meta.headings or []) + [chunk.text])
++
++
++def test_heading_only_chunks_land_in_page_order_not_at_tail(monkeypatch):
++    import core.chunker as ck
++    monkeypatch.setattr(ck, "HybridChunker", _FakeHybrid)
++    doc = _merged([
++        [("h1", "Intro"), ("p", "p1 body")],
++        [("h1", "Advanced Circuit"), ("h1", "Next Section")],   # heading-only -> shadowed
++        [("p", "p3 body")],
++        [("p", "p4 body")],
++    ])
++    chunks, metas, ids = ck.Chunker().split(doc, "f", "f.pdf")
++    pages = [m["page"] for m in metas]
++    assert pages == sorted(pages), f"chunks out of page order: {pages}"
++    assert "Advanced Circuit" in chunks
++    assert chunks.index("Advanced Circuit") < chunks.index("Intro\np1 body") + 3
++    assert [m["chunk_index"] for m in metas] == list(range(len(metas)))
++    assert ids == [f"f_c{i}" for i in range(len(ids))]
++
++
++def test_text_labelled_numbered_line_promoted_but_reps_are_not():
++    """MD backend labels paragraphs TEXT; v5.2 promotion only matched PARAGRAPH (dead code)."""
++    doc = _merged([[("p", "7.3 Train Systematically"), ("p", "3 sets of 10 reps"),
++                    ("p", "2.5 kg is the minimum load you should add."), ("p", "body")]])
++    _repair_pdf_headings(doc)
++    heads = [t.text for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER]
++    assert heads == ["7.3 Train Systematically"]

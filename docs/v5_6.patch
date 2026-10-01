@@ -1,0 +1,1030 @@
+diff --git a/core/chunker.py b/core/chunker.py
+index b649a99..0544974 100644
+--- a/core/chunker.py
++++ b/core/chunker.py
+@@ -241,17 +241,28 @@ class Chunker:
+                         page = item.prov[0].page_no
+                 except (AttributeError, IndexError, TypeError):
+                     pass
+-                metadatas.append(
+-                    {
+-                        "document_id": file_id,
+-                        "file_id": file_id,
+-                        "filename": filename,
+-                        "page": page,
+-                        "page_numbers": [page] if page is not None else [],
+-                        "chunk_index": len(metadatas),
+-                    }
+-                )
+-                chunks.append(heading_text)
++                synthetic_meta = {
++                    "document_id": file_id,
++                    "file_id": file_id,
++                    "filename": filename,
++                    "page": page,
++                    "page_numbers": [page] if page is not None else [],
++                    "chunk_index": len(metadatas),
++                }
++                # v5.5 Fix B: insert at the end of the heading's own page instead of
++                # appending at the tail (the "orphan chunks at the end" bug).
++                insert_at = len(chunks)
++                if page is not None:
++                    for idx, m in enumerate(metadatas):
++                        mp = m.get("page")
++                        if mp is not None and mp > page:
++                            insert_at = idx
++                            break
++                metadatas.insert(insert_at, synthetic_meta)
++                chunks.insert(insert_at, heading_text)
++
++        for idx, m in enumerate(metadatas):  # keep chunk_index == list position
++            m["chunk_index"] = idx
+ 
+         if not chunks:
+             raise ValueError(f"File {filename} does not contain extractable text")
+diff --git a/docs/v5_5_plan.md b/docs/v5_5_plan.md
+new file mode 100644
+index 0000000..96632b0
+--- /dev/null
++++ b/docs/v5_5_plan.md
+@@ -0,0 +1,77 @@
++# v5.5 Patch Plan: Fix the Two Bugs Diagnostics A/B Isolated
++
++**Branch:** `feat/pdf-deep-parser` (continues on v5.4)
++**Scope:** `parsers/pdf_router.py` (`_repair_pdf_headings()`, new `_heading_level()` /
++`_as_section_header()` helpers, Diagnostic A print widened), `core/chunker.py`
++(Gap B synthetic-heading insertion point). No schema/route changes.
++**Trigger:** v5.4's Diagnostic A/B output, captured from a real `test_parse.py`
++run (see the pasted `HEADING ...` / `ORPHAN-CHECK ...` lines and the 128-chunk
++dump attached to this session).
++
++---
++
++## What the diagnostics actually showed
++
++**Diagnostic A (heading-level hypothesis) was answered, but not the way v5.4
++guessed.** v5.4's hypothesis was that promoted numbered paragraphs all shared
++one wrong default `level`. The real dump showed something different:
++`"5.5 Mobility"` and `"7.10 Supercompensation"` — the two headings that
++correctly clear the freeze — are the *only* two lines in the entire dump with
++`level=1` and **no `level` attribute printed as a plain int for a
++`SECTION_HEADER`**, because they aren't `SECTION_HEADER` at all. Re-running the
++dump with the print widened to include `TITLE` (which v5.4's version silently
++excluded) confirmed it: both are `TitleItem`s. pymupdf4llm re-derives its own
++`'#'`/`'##'` mapping independently on every single-page conversion, so a
++sub-section heading that happens to be the single largest font on its own
++page comes out as `'# '` → `TitleItem`, which `HierarchicalChunker` keys at
++level 0 — a slot only another `TitleItem` can clear. Every numbered heading in
++between (7.1–7.9) is a `SECTION_HEADER` at level ≥ 1 and can never touch that
++level-0 slot, which is exactly the freeze span reported in v5.2/v5.3/v5.4.
++
++**Diagnostic B (list-order vs. traversal-order) confirmed traversal-order,**
++matching v5.4's own reading of the flat-index evidence: the three orphans sit
++at their correct positions in `doc.texts`. The actual cause is
++`core/chunker.py`'s Gap B pass, which appends heading-only synthetic chunks
++to the *end* of the output list regardless of their source page.
++
++## Fix 1 — normalise every heading to a leveled `SectionHeaderItem`
++
++`_repair_pdf_headings()`'s Pass 2 now rewrites **every** `TITLE` or
++`SECTION_HEADER` item into a `SectionHeaderItem` with an explicit level:
++numbered headings get their level from numbering depth (`"7.3"` → 2, `"7.3.1"`
++→ 3); unnumbered headings default to level 1, never 0. No `TitleItem` survives
++the pass, so nothing can occupy `HierarchicalChunker`'s level-0 slot by
++accident.
++
++## Fix 2 — insert Gap B synthetic chunks at page position, not at the tail
++
++`core/chunker.py`'s heading-only-chunk loop now finds the first existing chunk
++whose page is greater than the synthetic chunk's page and inserts there
++(falling back to the end when there is no later page), then renumbers
++`chunk_index` to match final list position.
++
++## Validation
++
++Reproduced both bugs offline against the installed `docling-core` (no
++project-specific code needed to prove the mechanism): a synthetic 5-page
++document with the same title/heading/text shape as the real PDF showed the
++identical freeze, confirming the `TitleItem`-as-level-0 mechanism before
++writing the fix. `tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py`
++carries that repro plus end-to-end tests for the real fix (including a
++`HybridChunker`-stand-in, since the real tokenizer needs a network fetch this
++sandbox doesn't have).
++
++## Known follow-ups (found by an external review of the fixed real-PDF run)
++
++Fixing the mechanism above did not fix every symptom that looked like it —
++several *different* causes produce the same "heading context wrong" symptom.
++Deferred to v5.6 (see `docs/v5_6_plan.md`):
++- Section numbers pymupdf4llm extracted out of position within the heading
++  string ("Greasing 6.4 the Groove").
++- An empty-text `TITLE`/`SECTION_HEADER` item, which this patch's Pass 2 skips
++  via `if not stripped: continue` before ever reaching the normalisation
++  step above — it keeps its raw (possibly level-0) level.
++- Heading text duplicated as literal, un-parsed markdown syntax
++  (`"### **7.1 Consistency**"`) glued onto the tail of the preceding
++  paragraph.
++- A handful of chapter headings pymupdf4llm never `'#'`-detected at all.
+diff --git a/docs/v5_6_plan.md b/docs/v5_6_plan.md
+new file mode 100644
+index 0000000..85312f0
+--- /dev/null
++++ b/docs/v5_6_plan.md
+@@ -0,0 +1,220 @@
++# v5.6 Patch Plan: Three More Causes Behind the Same Symptom
++
++**Branch:** `feat/pdf-deep-parser` (continues on v5.5)
++**Scope:** `parsers/pdf_router.py` only — new regexes, one rewritten branch in
++`_repair_pdf_headings()`'s Pass 2, two new helper functions
++(`_extract_misplaced_number()`, `_split_embedded_headings()`), `_as_section_header()`
++gains an optional `text=` override. No schema/route/config changes, no changes
++to `core/chunker.py` or `docling_parser.py`.
++**Trigger:** An external review of a full real-PDF run made against the v5.5
++patch (128 chunks, `PDF_DEBUG_HEADING_DUMP=1` output attached). v5.5 fixed
++exactly the two bugs Diagnostics A/B were built to isolate — confirmed: the
++review found no remaining instance of the *specific* 5.5→7.10 freeze span or
++of a chunk out of page order anywhere in the 128-chunk output. What it did
++find is three narrower, mechanically distinct bugs that produce the same
++surface symptom ("heading context looks wrong").
++
++---
++
++## What's actually in this patch, honestly
++
++Same posture as v5.4/v5.5: each fix below is validated against a reproduction
++built from the *actual strings* in the review and the real diagnostic dump —
++not against a hypothesis. Where a fix is a narrower heuristic with real
++false-positive risk (Fix D), the code and this doc say so explicitly, and it's
++scoped as small as it can be while still covering the cited case.
++
++**Not attempted here** — flagged, not silently dropped:
++- CTA/bullet text mis-detected as a heading with no decidable textual marker
++  (`"Become a Master of Your Own Bodyweight"`, `"Get The Program"`,
++  `"r Transform Now"`). Two of the review's cited cases *do* have a decidable
++  marker (`"Start Your Journey Now!"` ends in `!`; `"> Beginner Calisthenics
++  Program"` starts with a blockquote marker) but several don't, and a
++  heuristic that only catches some of them while silently missing others in
++  the same category isn't worth the false-positive risk it adds elsewhere in
++  the document. Needs either a font-size/boldness signal Docling's already
++  discarded by this stage, or a hand-maintained deny-list — both bigger
++  changes than this patch's scope.
++- Table bugs: the duplicated Advanced/Beginner circuit tables (#53/#54
++  identical), column-group mis-keying (protein tables, fats table), header
++  row treated as data (5.7 weekly table, contents page, core circuit).
++  Entirely different subsystem (Docling's table structure extraction /
++  `HybridChunker`'s table serializer), not a heading-ordering bug.
++- OCR/text-corruption (`"perlOOg"`, lost spaces, scrambled carb values,
++  `"nut t t nts"`) and the mojibake (already established as a console-encoding
++  artifact in the review, not a real bug).
++- `"Apply The 8 80/20 Rule 66"` — its real `"9.9"` numbering isn't present
++  anywhere in the extracted text (see Fix A below for why this specific case
++  can't be recovered).
++
++---
++
++## Fix A — relocate a section number pymupdf4llm extracted out of position
++
++**The bug:** `_heading_level()` (from v5.2/v5.5) only ever looks at a
++heading's *first word* to detect numbering. When pymupdf4llm's per-page
++extraction puts the section number somewhere other than the front —
++`"Greasing 6.4 the Groove"`, `"Circuit t Training 6.5"`, `"Strength & Skill
++Routine 5.7"`, `"Chest Circuit 6.5.1"`, `"Hydration 9.6"` — that check finds
++nothing and falls back to a flat, undifferentiated level 1 for all of them,
++which is exactly what the real diagnostic dump shows.
++
++**The fix:** `_extract_misplaced_number(text)` searches the *whole* string for
++a dotted number token. If exactly one is found and it isn't already leading,
++the string is rewritten with the number moved to the front and the level is
++derived from its dot count, same convention as the existing leading-number
++path (`"N.N"` → level 2, `"N.N.N"` → level 3). Zero or multiple candidates
++return `None` and the text is left untouched — this is why
++`"Apply The 8 80/20 Rule 66"` isn't touched: `"66"` has no dot, so it never
++matches the candidate pattern at all, and there's no dotted number anywhere
++else in the string to relocate. Its real section number appears to be lost
++upstream of anything this pass can see; recovering it would mean cross-
++referencing the table of contents against page numbers, well outside a
++heading-repair pass.
++
++```python
++_SECTION_NUMBER_TOKEN_RE = re.compile(r"\d+\.\d+(?:\.\d+){0,2}")
++
++def _extract_misplaced_number(text: str) -> tuple[str, int] | None:
++    matches = list(_SECTION_NUMBER_TOKEN_RE.finditer(text))
++    if len(matches) != 1:
++        return None
++    match = matches[0]
++    if match.start() == 0:
++        return None
++    number = match.group(0)
++    remainder = (text[:match.start()] + " " + text[match.end():]).strip()
++    remainder = re.sub(r"\s{2,}", " ", remainder)
++    if not remainder:
++        return None
++    return f"{number} {remainder}", number.count(".") + 1
++```
++
++Wired into Pass 2 ahead of the existing `_heading_level()` fallback, for
++`TITLE`/`SECTION_HEADER` items only.
++
++---
++
++## Fix B — an empty-text heading no longer keeps its raw (possibly level-0) level
++
++**The bug:** v5.5's Pass 2 opens with `if not stripped: continue` before ever
++reaching the normalisation step Fix 1 (v5.5) added. An empty-text
++`TITLE`/`SECTION_HEADER` — confirmed present on page 19 in the real dump,
++right where `"Beginners Circuit"` finally clears — skips normalisation
++entirely and keeps whatever level the per-page parser gave it, which can be
++level 0. That happens to be *why* the freeze cleared where the review saw it
++clear, which is the wrong reason: an empty heading with no text conveys no
++section information and shouldn't be able to reset the stack at all, reliably
++or not.
++
++**The fix:** heading items with empty text are now handled *before* the
++generic empty-string skip: they're rewritten into an empty `TextItem`. The
++document serializer emits empty text for an empty item, so
++`HierarchicalChunker.chunk()`'s own `if not ser_res.text: continue` drops it
++from chunk output entirely — inert, rather than a silent, level-dependent
++reset.
++
++---
++
++## Fix C — delete duplicated heading text, don't re-promote it
++
++**The bug:** four cited instances — `"### **7.1 Consistency**"`,
++`"### **8.1 Can you make muscles with calisthenics?**"`,
++`"### **9.1 Why is nutrition so important?**"`,
++`"### **9.2 Nutrition & Calisthenics: 2 Important principles**"` — all glued
++onto the *tail* of the preceding paragraph as literal markdown. CommonMark
++only recognises an ATX heading (`#`/`##`/`###`) when it's the first thing on
++its own line; pymupdf4llm's page markdown apparently emits some heading text
++twice (once as a correctly-positioned, blank-line-separated heading that
++marko *does* parse, and once more folded into the end of the prior block),
++so marko never turns the second copy into a heading node. **Checked against
++the real dump for all four cases: the real, correctly-typed heading already
++exists elsewhere in the document with matching text.** This is why the fix
++deletes the fragment rather than promoting it into a second heading node —
++promoting it would create a duplicate entry in the heading path for no
++benefit.
++
++**The fix:** `_split_embedded_headings()` first collects the set of texts
++already carried by real `SECTION_HEADER`/`TITLE` items, then for every
++`PARAGRAPH`/`TEXT` item searches for a trailing `#{1,6}\s*\*{0,2}...\*{0,2}`
++fragment; if the recovered text matches something already in that set, the
++fragment is stripped from the item's text. A fragment that *doesn't* match
++anything already known is left alone — Fix C only removes confirmed
++duplicates, never a guess (see `test_unmatched_hash_fragment_is_left_alone`).
++
++Run this pass *after* `_repair_pdf_headings()`, not before — it depends on
++real headings already being present and correctly labelled to build its
++matching set.
++
++---
++
++## Fix D — promote a chapter heading pymupdf4llm never detected at all
++
++**The bug:** `"10 CRUCIAL TRAINING PRINCIPLES"` has no corresponding heading
++item anywhere in the real diagnostic dump — unlike Fix C's cases, there's no
++duplicate to delete because there's no original either. It survives only as
++`**bold**` text at the start of an ordinary paragraph. Font-size heading
++detection is per-page and looks at the single largest font on the page; a
++large decorative numeral next to comparatively modest bold chapter text would
++explain why this heading in particular was never picked up as `'#'`/`'##'`.
++
++**The fix:** a narrow pattern — 2 to 7 leading ALL-CAPS/number tokens
++immediately followed by normal-case prose — is promoted via
++`doc.insert_heading(sibling=item, ..., after=False)`. This API was chosen
++deliberately over `doc.texts.insert()`: `self_ref` in this version of
++docling-core is positional (`#/texts/N`), confirmed by direct inspection, so
++a naive list insert would silently invalidate every ref after the insertion
++point. `insert_heading()` instead reorders `doc.body.children` (which is what
++`HierarchicalChunker`'s traversal actually walks) without touching any
++existing item's position in the flat `doc.texts` list — verified directly
++against the installed `docling-core` before writing the fix.
++
++**This is a heuristic, not a general-purpose title detector**, and the code
++says so. A document whose ordinary prose legitimately opens with a
++capitalised multi-word phrase could be mis-promoted by this pattern; it isn't
++generalised further than the one confirmed case this patch was built against.
++`test_ordinary_prose_is_not_mis_promoted` and
++`test_already_existing_heading_is_not_duplicated` cover the two failure modes
++that would matter most (false-positive promotion; double-promoting something
++that already has a proper heading elsewhere).
++
++---
++
++## File ownership for this patch
++
++| File | Action |
++|---|---|
++| `parsers/pdf_router.py` | [MODIFY] new regexes; `_as_section_header()` gains `text=`; Pass 2 gains Fix A/B; new `_extract_misplaced_number()`, `_split_embedded_headings()` (Fix C+D), called at the end of `_repair_pdf_headings()`'s call site in `_merge_pages()` |
++| `core/chunker.py` | **no change** |
++| `docling_parser.py` | **no change** |
++| `config.py` | **no change** |
++| `tests/parsing_arch/v5_6/test_heading_review_fixes.py` | [NEW] — 13 tests, one per fix plus the two false-positive guards for Fix D |
++
++## Validation
++
++All four fixes reproduced and tested offline against the installed
++`docling-core` (`HierarchicalChunker` + real `insert_heading()`), using the
++exact strings quoted in the review and diagnostic dump — not synthetic
++stand-ins. A combined end-to-end replay of the real page-16-through-19
++sequence (Greasing 6.4 → Circuit 6.5 → Chest Circuit 6.5.1 → Advanced/
++Beginners Circuit → 10 CRUCIAL... → 7.1 Consistency → empty title → 7.5
++Bodybuilding mind) produces a clean, correctly-nested heading path with no
++freeze and no duplicate/orphan heading, run manually and inspected line by
++line before this doc was written up. Existing v5.2/v5.4/v5.5 suites re-run
++unchanged and green.
++
++## Non-regression checklist
++
++- [ ] `tests/parsing_arch/v5_2/`, `v5_4/`, `v5_5/` pass unchanged
++- [ ] `tests/parsing_arch/v5_6/test_heading_review_fixes.py` passes
++- [ ] `core/chunker.py` diff is empty
++- [ ] `docling_parser.py` diff is empty
++- [ ] Manual spot-check: rerun `test_parse.py` against the same PDF; confirm
++      `"Greasing 6.4 the Groove"` / `"Strength & Skill Routine 5.7"` /
++      `"Circuit t Training 6.5"` / `"Chest Circuit 6.5.1"` / `"Hydration 9.6"`
++      now read number-first at the correct level; confirm no chunk contains a
++      literal `###` or `**N.N ...**` fragment; confirm `"10 CRUCIAL TRAINING
++      PRINCIPLES"` appears as its own heading and stays in `chunk.meta.headings`
++      through §7.1–7.4
++- [ ] Do **not** attempt the CTA/bullet or table-content issues from this
++      patch — deferred, see "Not attempted here" above
+diff --git a/parsers/pdf_router.py b/parsers/pdf_router.py
+index b510878..555fe34 100644
+--- a/parsers/pdf_router.py
++++ b/parsers/pdf_router.py
+@@ -56,6 +56,45 @@ cross-page nesting which caused HybridChunker's heading context to freeze
+ (items' parent refs stayed anchored to stale per-page sub-tree roots) and
+ orphaned items to land at the document tail. This unified fix resolves both
+ Issue 2 (heading freeze) and Issue 4 (tail ordering) in one step.
++
++v5.5 notes
++----------
++_flatten_document() removal (v5.4) and the tail-ordering fix in
++core/chunker.py, plus normalising every TITLE/SECTION_HEADER to a leveled
++SectionHeaderItem here in _repair_pdf_headings(), fixed the two bugs
++Diagnostics A/B were built to isolate (see docs/v5_5_plan.md). An external
++review of a full real-PDF run then surfaced three narrower, distinct bugs
++addressed in v5.6 below.
++
++v5.6 notes
++----------
++_extract_misplaced_number() handles headings whose section number pymupdf4llm
++extracted out of position ("Greasing 6.4 the Groove", "Strength & Skill
++Routine 5.7") instead of leading ("6.4 Greasing the Groove") -- v5.5's
++_heading_level() only ever looked at the first word, so these fell back to a
++flat level 1 and stopped clearing the heading stack correctly.
++The empty-text branch of _repair_pdf_headings()'s main loop no longer
++skips empty-text SECTION_HEADER/TITLE items outright (v5.5's `if not
++stripped: continue` silently left them at whatever level the per-page
++parser gave them, including level 0); they are now emptied into harmless
++PARAGRAPH items like any other dropped fragment.
++_split_embedded_headings() is a new post-repair pass for heading text that
++never became its own DocItem: some heading text is *duplicated* verbatim as
++literal "### **text**" markdown syntax glued onto the tail of the preceding
++paragraph (marko never parses it as an ATX heading because it is not the
++first thing on its line) -- confirmed against a real-PDF run that every
++such fragment duplicates a heading that already exists correctly elsewhere,
++so the fix deletes the noise rather than creating a second heading. A
++narrower, separate heuristic in the same pass promotes a leading run of
++ALL-CAPS words in an ordinary paragraph ("10 CRUCIAL TRAINING PRINCIPLES...")
++that pymupdf4llm never '#'-detected at all, since it was not the single
++largest font on its page.
++Not attempted in v5.6 (see docs/v5_6_plan.md for why): CTA/bullet text
++mis-detected as a heading with no decidable textual marker (e.g. "Become a
++Master of Your Own Bodyweight"), table column-scrambling and duplicated
++Advanced/Beginner circuit tables, OCR text corruption, and the "Apply The 8
++80/20 Rule 66" heading (its real "9.9" numbering is not recoverable from the
++extracted text at all -- this is upstream data loss, not a formatting bug).
+ """
+ import logging
+ import re
+@@ -85,6 +124,31 @@ logger = logging.getLogger(__name__)
+ # Groups: one or more digit-dot segments followed by a non-whitespace word.
+ _NUMBERED_HEADING_RE = re.compile(r"^\d+(\.\d+){0,3}\s+\S")
+ 
++# v5.5: stricter pattern used ONLY to promote body text to a heading.  Docling's MD
++# backend labels plain paragraphs TEXT (not PARAGRAPH), so promotion must accept TEXT;
++# but the loose regex above would then turn "3 sets of 10 reps" into a heading.
++# Require a dotted number ("7.3", "9.4.2") followed by a capitalised word.
++_PROMOTABLE_HEADING_RE = re.compile(r"^\d+\.\d+(\.\d+){0,2}\s+[A-Z]")
++
++# v5.6 Fix A: a dotted section number ANYWHERE in a heading string, used to find
++# one that pymupdf4llm extracted out of position (not as the leading token).
++_SECTION_NUMBER_TOKEN_RE = re.compile(r"\d+\.\d+(?:\.\d+){0,2}")
++
++# v5.6 Fix C: a markdown ATX-heading fragment ("### **text**") glued onto the
++# tail of a paragraph because it wasn't the first thing on its own line, so
++# marko's block parser never split it into a real heading node.
++_EMBEDDED_MD_HEADING_RE = re.compile(
++    r"(?:\n|^)\s*#{1,6}\s*\*{0,2}(?P<htext>[^\n*]+?)\*{0,2}\s*\Z"
++)
++
++# v5.6 Fix D: a leading run of 2-7 ALL-CAPS/number tokens immediately followed
++# by normal-case prose -- a chapter-style heading pymupdf4llm never '#'-detected
++# because it wasn't the single largest font on its page. Narrow and heuristic;
++# see _split_embedded_headings() docstring for the false-positive trade-off.
++_LEADING_ALLCAPS_RE = re.compile(
++    r"^\*{0,2}(?P<caps>[A-Z0-9][A-Z0-9&/]*(?:\s+[A-Z0-9][A-Z0-9&/]*){1,6})\s+(?=[A-Z][a-z])"
++)
++
+ 
+ def _repair_pdf_headings(
+     doc: DoclingDocument,
+@@ -129,9 +193,26 @@ def _repair_pdf_headings(
+         t for t, pages in pages_seen_on.items() if len(pages) >= threshold
+     }
+ 
+-    # Pass 2 — demote boilerplate, promote numbered headings
++    # Pass 2 — demote boilerplate, normalise heading type/level, promote numbered paragraphs
+     for i, item in enumerate(doc.texts):
+         stripped = (item.text or "").strip()
++
++        # v5.6 Fix B: an empty-text heading item is not a demotion candidate (it
++        # matches nothing in `boilerplate`) and isn't a real heading either --
++        # v5.5 skipped it via the blanket "if not stripped: continue" below, so
++        # it kept whatever level the per-page parser gave it, including level 0
++        # (HierarchicalChunker's document-title slot), where it would silently
++        # reset any heading in progress the next time the traversal reached it.
++        # Emptying it into a plain TextItem makes it inert instead: the doc
++        # serializer emits empty text for it, so HierarchicalChunker's own
++        # `if not ser_res.text: continue` drops it from chunk output entirely.
++        if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE) and not stripped:
++            dump = item.model_dump()
++            dump["label"] = DocItemLabel.TEXT
++            text_fields = TextItem.model_fields.keys()
++            doc.texts[i] = TextItem(**{k: v for k, v in dump.items() if k in text_fields})
++            continue
++
+         if not stripped:
+             continue
+ 
+@@ -148,15 +229,187 @@ def _repair_pdf_headings(
+             doc.texts[i] = TextItem(**{k: v for k, v in dump.items() if k in text_fields})
+             continue
+ 
++        # v5.5 Fix A: normalise EVERY heading to a SectionHeaderItem with a
++        # deterministic level.  pymupdf4llm is called once per page, so its
++        # font-size -> '#'/'##'/'###' mapping is recomputed per page: a sub-section
++        # heading that is the largest font on its page becomes '# ' -> TitleItem,
++        # which HierarchicalChunker treats as level 0 and never clears until the
++        # next TitleItem (the "5.5 Mobility" freeze).  Numbered headings get their
++        # level from numbering depth ("7" -> 1, "7.3" -> 2, "7.3.1" -> 3).
++        if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE):
++            current = getattr(item, "level", None)
++            # v5.6 Fix A: the section number pymupdf4llm found is sometimes not
++            # the heading's leading token ("Greasing 6.4 the Groove", "Strength
++            # & Skill Routine 5.7") -- _heading_level() only ever looks at the
++            # first word, so these fell back to a flat level 1. Relocate the
++            # number to the front and derive level from it before that fallback.
++            relocated = _extract_misplaced_number(stripped)
++            if relocated is not None:
++                new_text, level = relocated
++                doc.texts[i] = _as_section_header(item, level, text=new_text)
++            else:
++                level = _heading_level(stripped, current)
++                if item.label == DocItemLabel.TITLE or current != level:
++                    doc.texts[i] = _as_section_header(item, level)
++            continue
++
+         # Promote numbered paragraphs to section headers
+         if (
+-            item.label == DocItemLabel.PARAGRAPH
+-            and len(stripped) < 100
+-            and _NUMBERED_HEADING_RE.match(stripped)
++            item.label in (DocItemLabel.PARAGRAPH, DocItemLabel.TEXT)
++            and len(stripped) < 80
++            and not stripped.endswith((".", ",", ";", ":"))
++            and _PROMOTABLE_HEADING_RE.match(stripped)
+         ):
+-            dump = item.model_dump()
+-            dump["label"] = DocItemLabel.SECTION_HEADER
+-            doc.texts[i] = SectionHeaderItem(**dump)
++            doc.texts[i] = _as_section_header(item, _heading_level(stripped, None))
++
++    # v5.6 Fix C + Fix D — heading text that never became its own DocItem.
++    _split_embedded_headings(doc)
++
++
++def _heading_level(text: str, current: int | None) -> int:
++    """Return the chunker heading level (>=1) for a heading.
++
++    Numbered headings derive level from numbering depth; unnumbered headings keep
++    their existing SectionHeader level, defaulting to 1 (never 0: level 0 is the
++    document-title slot in HierarchicalChunker and is only cleared by another title).
++    """
++    if _NUMBERED_HEADING_RE.match(text):
++        return text.split()[0].count(".") + 1
++    return max(current or 1, 1)
++
++
++def _as_section_header(item, level: int, text: str | None = None) -> SectionHeaderItem:
++    """Rebuild any text-like item as a SectionHeaderItem at ``level`` (same self_ref/parent).
++
++    Args:
++        item:  Source item (TextItem, SectionHeaderItem, or TitleItem).
++        level: Heading level to assign.
++        text:  If given, replaces the item's text (v5.6 Fix A: relocating a
++               misplaced section number rewrites the string, not just the level).
++    """
++    dump = item.model_dump()
++    dump["label"] = DocItemLabel.SECTION_HEADER
++    dump["level"] = level
++    if text is not None:
++        dump["text"] = text
++    fields = SectionHeaderItem.model_fields.keys()
++    return SectionHeaderItem(**{k: v for k, v in dump.items() if k in fields})
++
++
++def _extract_misplaced_number(text: str) -> tuple[str, int] | None:
++    """Find a dotted section number embedded in a heading string and move it to the front.
++
++    pymupdf4llm's per-page heading detection uses raw text-block reading order.
++    When a section number is typeset as a separate design element positioned
++    near a heading -- rather than literally being the heading's first word --
++    it ends up interleaved into the extracted string at whatever position the
++    page's reading order put it: "Greasing 6.4 the Groove", "Circuit t Training
++    6.5", "Strength & Skill Routine 5.7". _heading_level() only ever inspects
++    the first word, so these all fell back to a flat, undifferentiated level 1.
++
++    Deliberately conservative: only acts when exactly one dotted-number token
++    is found and it is not already leading (that case is handled by the
++    existing _NUMBERED_HEADING_RE path). Zero or multiple candidates are
++    ambiguous and are left for a human / a future pass rather than guessed at.
++    A single *un-dotted* trailing number (e.g. a stray page-number digit) never
++    matches _SECTION_NUMBER_TOKEN_RE at all, so it is never touched here --
++    see docs/v5_6_plan.md for the "Apply The 8 80/20 Rule 66" case this misses.
++
++    Args:
++        text: Stripped heading text.
++
++    Returns:
++        ``(new_text, level)`` with the number relocated to the front, or
++        ``None`` if the text doesn't contain exactly one relocatable number.
++    """
++    matches = list(_SECTION_NUMBER_TOKEN_RE.finditer(text))
++    if len(matches) != 1:
++        return None
++    match = matches[0]
++    if match.start() == 0:
++        return None  # already leading; nothing to relocate
++    number = match.group(0)
++    remainder = (text[: match.start()] + " " + text[match.end() :]).strip()
++    remainder = re.sub(r"\s{2,}", " ", remainder)
++    if not remainder:
++        return None
++    return f"{number} {remainder}", number.count(".") + 1
++
++
++def _split_embedded_headings(doc: DoclingDocument) -> None:
++    """Handle heading text that pymupdf4llm never turned into its own DocItem.
++
++    Two unrelated phenomena share a symptom (heading-shaped text stuck inside
++    an ordinary PARAGRAPH/TEXT item) but need opposite fixes:
++
++    **Fix C — duplicate noise, delete it.** Some pages' markdown repeats a
++    heading's text a second time as a literal "### **text**" fragment glued
++    onto the tail of the *preceding* paragraph. marko's block parser only
++    recognises an ATX heading when '#' starts its own line, so this fragment
++    never became a heading node -- but the *real* heading, correctly typed,
++    already exists elsewhere in the document (confirmed for every instance
++    found in the real-PDF run this was built against; see docs/v5_6_plan.md).
++    Creating a second heading node for it would just duplicate the heading
++    path, so this strips the fragment instead of promoting it.
++
++    **Fix D — genuinely missing heading, promote it.** A handful of
++    chapter-style headings are never '#'-detected at all, because they are
++    not the single largest font on their page (e.g. a large decorative
++    numeral sits beside modest-sized bold chapter text). These survive only
++    as **bold** text at the start of an ordinary paragraph, with no
++    corresponding heading item anywhere in the document. A narrow pattern --
++    a leading run of ALL-CAPS/number tokens immediately followed by
++    normal-case prose -- is promoted into a real SectionHeaderItem via
++    doc.insert_heading(), which correctly reorders doc.body.children without
++    disturbing any existing item's self_ref (self_ref is positional in
++    docling-core; a naive doc.texts.insert() would silently invalidate every
++    ref after the insertion point).
++
++    This is a heuristic, not a general-purpose title detector: a document
++    whose ordinary prose legitimately opens with a multi-word capitalised
++    phrase (an acronym-heavy sentence, a quoted heading-style name) could be
++    mis-promoted. Scope it to your own corpus with tests before trusting it
++    on documents unlike the one this was built against.
++
++    Args:
++        doc: Fully-merged, already heading-normalised DoclingDocument (i.e.
++             call this AFTER _repair_pdf_headings(), not before -- Fix C
++             depends on real headings already being correctly labelled).
++    """
++    heading_texts = {
++        (item.text or "").strip()
++        for item in doc.texts
++        if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE)
++        and (item.text or "").strip()
++    }
++
++    for item in list(doc.texts):
++        if item.label not in (DocItemLabel.PARAGRAPH, DocItemLabel.TEXT):
++            continue
++        text = item.text or ""
++
++        # Fix C: strip a trailing "### **text**" fragment that duplicates a
++        # heading that already exists as its own item elsewhere.
++        dup_match = _EMBEDDED_MD_HEADING_RE.search(text)
++        if dup_match and dup_match.group("htext").strip() in heading_texts:
++            text = text[: dup_match.start()].rstrip()
++            item.text = text
++
++        # Fix D: promote a leading ALL-CAPS run pymupdf4llm never '#'-detected.
++        stripped = text.strip()
++        caps_match = _LEADING_ALLCAPS_RE.match(stripped)
++        if caps_match and len(caps_match.group("caps")) >= 8:
++            heading_text = caps_match.group("caps")
++            if heading_text not in heading_texts:
++                item.text = stripped[caps_match.end() :].strip()
++                doc.insert_heading(
++                    sibling=item,
++                    text=heading_text,
++                    level=1,
++                    prov=item.prov[0] if item.prov else None,
++                    after=False,
++                )
++                heading_texts.add(heading_text)
+ 
+ 
+ def _flatten_document(doc: DoclingDocument) -> DoclingDocument:
+@@ -526,12 +779,13 @@ class PdfPageRouter(BaseParser):
+         #   tree-traversal by HybridChunker / export_to_markdown().
+         if settings.pdf_debug_heading_dump:
+             for item in combined.texts:
+-                if item.label == DocItemLabel.SECTION_HEADER:
++                if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE):
+                     text_preview = (item.text or "")[:40]
+-                    level = getattr(item, "level", "<no level attr>")
++                    level = getattr(item, "level", "<TITLE=level0>")
+                     page_no = item.prov[0].page_no if item.prov else None
+                     print(  # noqa: T201 — intentional debug output, gated by flag
+-                        f"HEADING page={page_no} level={level!r} text={text_preview!r}"
++                        f"HEADING page={page_no} label={item.label.value} "
++                        f"level={level!r} text={text_preview!r}"
+                     )
+             total = len(combined.texts)
+             orphan_markers = ("Advanced Circuit", "CONTENTS", "FULUOURIMEY", "Animal Protein")
+diff --git a/tests/parsing_arch/v5_5/__init__.py b/tests/parsing_arch/v5_5/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py b/tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py
+new file mode 100644
+index 0000000..157f48d
+--- /dev/null
++++ b/tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py
+@@ -0,0 +1,131 @@
++"""
++tests/parsing_arch/v5_5/test_title_freeze_and_tail_order.py
++
++v5.5 regression tests, built from the v5.4 diagnostic evidence.
++
++Root causes (reproduced offline with docling-core):
++  A. Heading freeze: pymupdf4llm runs per page, so a sub-section heading that is the
++     largest font on its page comes out as '# ' -> TitleItem.  HierarchicalChunker
++     keys its heading stack by level and treats TitleItem as level 0, which no
++     SectionHeader (level >= 1) can ever clear.  Diagnostic A missed it because it
++     only printed label == SECTION_HEADER.
++  B. Tail orphans: core/chunker.py's "Gap B" loop appended heading-only synthetic
++     chunks at the END of the chunk list.  The flat doc.texts order was always fine.
++"""
++import pytest
++from docling_core.types.doc import (
++    BoundingBox, DocItemLabel, DoclingDocument, ProvenanceItem,
++)
++from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
++
++from parsers.pdf_router import _repair_pdf_headings
++
++
++def _prov(n):
++    return [ProvenanceItem(page_no=n, bbox=BoundingBox(l=0, t=0, r=0, b=0), charspan=(0, 0))]
++
++
++def _page(n, spec):
++    d = DoclingDocument(name=f"p{n}")
++    for kind, txt in spec:
++        if kind == "title":
++            it = d.add_title(text=txt)
++        elif kind.startswith("h"):
++            it = d.add_heading(text=txt, level=int(kind[1]))
++        else:
++            it = d.add_text(label=DocItemLabel.TEXT, text=txt)
++        it.prov = _prov(n)
++    return d
++
++
++def _merged(pages):
++    combined = DoclingDocument(name="x")
++    for n, spec in enumerate(pages, 1):
++        combined.add_document(_page(n, spec))
++    return combined
++
++
++PAGES = [
++    [("title", "5.5 Mobility"), ("p", "mobility body")],
++    [("h1", "5.6 Structure"), ("p", "structure body")],
++    [("p", "7.3 Train Systematically"), ("p", "train body")],
++    [("h2", "7.4 Track Progress"), ("p", "track body")],
++    [("title", "7.10 Supercompensation"), ("p", "super body")],
++]
++
++
++def _headings_by_body(doc):
++    return {c.text: c.meta.headings for c in HierarchicalChunker().chunk(doc)}
++
++
++def test_bug_reproduced_without_repair():
++    """Sanity: the raw merged doc really exhibits the freeze."""
++    hb = _headings_by_body(_merged(PAGES))
++    assert "5.5 Mobility" in hb["track body"]
++
++
++def test_title_items_no_longer_freeze_heading_path():
++    doc = _merged(PAGES)
++    _repair_pdf_headings(doc)
++    hb = _headings_by_body(doc)
++    assert hb["mobility body"] == ["5.5 Mobility"]
++    assert hb["structure body"] == ["5.6 Structure"]
++    assert hb["train body"] == ["7.3 Train Systematically"]
++    assert hb["track body"] == ["7.4 Track Progress"]
++    assert hb["super body"] == ["7.10 Supercompensation"]
++
++
++def test_no_title_labels_remain_and_levels_follow_numbering():
++    doc = _merged(PAGES)
++    _repair_pdf_headings(doc)
++    assert not [t for t in doc.texts if t.label == DocItemLabel.TITLE]
++    levels = {t.text: t.level for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER}
++    assert set(levels.values()) == {2}           # all N.N -> level 2
++    doc2 = _merged([[("title", "7 Training"), ("p", "x"), ("p", "7.1.2 Deep dive"), ("p", "y")]])
++    _repair_pdf_headings(doc2)
++    lv = {t.text: t.level for t in doc2.texts if t.label == DocItemLabel.SECTION_HEADER}
++    assert lv == {"7 Training": 1, "7.1.2 Deep dive": 3}
++
++
++def test_unnumbered_title_becomes_level_1_not_0():
++    doc = _merged([[("title", "CONTENTS"), ("p", "body")]])
++    _repair_pdf_headings(doc)
++    h = [t for t in doc.texts if t.text == "CONTENTS"][0]
++    assert h.label == DocItemLabel.SECTION_HEADER and h.level == 1
++
++
++class _FakeHybrid:
++    """HybridChunker stand-in (real one needs a HF tokenizer download)."""
++    def __init__(self, **kw):
++        self._c = HierarchicalChunker()
++    def chunk(self, doc):
++        return self._c.chunk(doc)
++    def contextualize(self, chunk):
++        return "\n".join((chunk.meta.headings or []) + [chunk.text])
++
++
++def test_heading_only_chunks_land_in_page_order_not_at_tail(monkeypatch):
++    import core.chunker as ck
++    monkeypatch.setattr(ck, "HybridChunker", _FakeHybrid)
++    doc = _merged([
++        [("h1", "Intro"), ("p", "p1 body")],
++        [("h1", "Advanced Circuit"), ("h1", "Next Section")],   # heading-only -> shadowed
++        [("p", "p3 body")],
++        [("p", "p4 body")],
++    ])
++    chunks, metas, ids = ck.Chunker().split(doc, "f", "f.pdf")
++    pages = [m["page"] for m in metas]
++    assert pages == sorted(pages), f"chunks out of page order: {pages}"
++    assert "Advanced Circuit" in chunks
++    assert chunks.index("Advanced Circuit") < chunks.index("Intro\np1 body") + 3
++    assert [m["chunk_index"] for m in metas] == list(range(len(metas)))
++    assert ids == [f"f_c{i}" for i in range(len(ids))]
++
++
++def test_text_labelled_numbered_line_promoted_but_reps_are_not():
++    """MD backend labels paragraphs TEXT; v5.2 promotion only matched PARAGRAPH (dead code)."""
++    doc = _merged([[("p", "7.3 Train Systematically"), ("p", "3 sets of 10 reps"),
++                    ("p", "2.5 kg is the minimum load you should add."), ("p", "body")]])
++    _repair_pdf_headings(doc)
++    heads = [t.text for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER]
++    assert heads == ["7.3 Train Systematically"]
+diff --git a/tests/parsing_arch/v5_6/__init__.py b/tests/parsing_arch/v5_6/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/parsing_arch/v5_6/test_heading_review_fixes.py b/tests/parsing_arch/v5_6/test_heading_review_fixes.py
+new file mode 100644
+index 0000000..9d950f2
+--- /dev/null
++++ b/tests/parsing_arch/v5_6/test_heading_review_fixes.py
+@@ -0,0 +1,207 @@
++"""
++tests/parsing_arch/v5_6/test_heading_review_fixes.py
++
++v5.6 regression tests, built from an external review of a real-PDF run made
++against the v5.5 patch. Covers three distinct causes behind the same
++symptom (heading-shaped text not participating correctly in the heading
++path):
++
++  A. Misplaced section number: "Greasing 6.4 the Groove" -> should read
++     "6.4 Greasing the Groove" at level 2, not level 1 with the number
++     stuck mid-string.
++  B. Empty-text heading regression from v5.5: an empty SECTION_HEADER/TITLE
++     was skipped by "if not stripped: continue" and kept its raw level
++     (including level 0), silently resetting the heading stack.
++  C. Duplicate heading noise: "### **7.1 Consistency**" glued onto the tail
++     of the PRECEDING paragraph, duplicating a heading that already exists
++     correctly elsewhere -- should be deleted, not promoted again.
++  D. Never-detected heading: "10 CRUCIAL TRAINING PRINCIPLES" survives only
++     as bold text with no heading item anywhere -- should be promoted.
++"""
++from docling_core.types.doc import (
++    BoundingBox, DocItemLabel, DoclingDocument, ProvenanceItem, SectionHeaderItem,
++)
++from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
++
++from parsers.pdf_router import _repair_pdf_headings, _split_embedded_headings, _extract_misplaced_number
++
++
++def _prov(n):
++    return [ProvenanceItem(page_no=n, bbox=BoundingBox(l=0, t=0, r=0, b=0), charspan=(0, 0))]
++
++
++def _full_repair(doc):
++    _repair_pdf_headings(doc)
++    _split_embedded_headings(doc)
++
++
++# ---------------------------------------------------------------------------
++# Fix A — misplaced section number
++# ---------------------------------------------------------------------------
++
++class TestMisplacedNumber:
++    def test_extract_helper_relocates_single_candidate(self):
++        assert _extract_misplaced_number("Greasing 6.4 the Groove") == ("6.4 Greasing the Groove", 2)
++        assert _extract_misplaced_number("Strength & Skill Routine 5.7") == \
++            ("5.7 Strength & Skill Routine", 2)
++        assert _extract_misplaced_number("Chest Circuit 6.5.1") == ("6.5.1 Chest Circuit", 3)
++
++    def test_leading_number_is_left_alone(self):
++        assert _extract_misplaced_number("7.3 Train Systematically") is None
++
++    def test_no_dotted_number_returns_none(self):
++        assert _extract_misplaced_number("Apply The 8 80/20 Rule 66") is None
++
++    def test_ambiguous_multiple_candidates_returns_none(self):
++        assert _extract_misplaced_number("6.1 versus 6.2 comparison") is None
++
++    def test_end_to_end_level_and_text_fixed(self):
++        doc = DoclingDocument(name="x")
++        h = doc.add_title(text="Greasing 6.4 the Groove")
++        h.prov = _prov(16)
++        b = doc.add_text(label=DocItemLabel.TEXT, text="body text")
++        b.prov = _prov(16)
++        _full_repair(doc)
++        headers = [t for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER]
++        assert headers[0].text == "6.4 Greasing the Groove"
++        assert headers[0].level == 2
++
++
++# ---------------------------------------------------------------------------
++# Fix B — empty-text heading regression
++# ---------------------------------------------------------------------------
++
++class TestEmptyHeadingRegression:
++    def test_empty_title_no_longer_freezes_stack_at_level_0(self):
++        doc = DoclingDocument(name="x")
++        h1 = doc.add_title(text="7.4 Track Your Progress")
++        h1.prov = _prov(19)
++        empty = doc.add_title(text="")
++        empty.prov = _prov(19)
++        h2 = doc.add_heading(text="7.5 Bodybuilding mind", level=1)
++        h2.prov = _prov(19)
++        body = doc.add_text(label=DocItemLabel.TEXT, text="mindset body")
++        body.prov = _prov(19)
++
++        _full_repair(doc)
++        headings = {c.text: c.meta.headings for c in HierarchicalChunker().chunk(doc)}
++        assert headings["mindset body"] == ["7.5 Bodybuilding mind"]
++
++    def test_empty_heading_item_produces_no_chunk(self):
++        doc = DoclingDocument(name="x")
++        empty = doc.add_title(text="")
++        empty.prov = _prov(19)
++        body = doc.add_text(label=DocItemLabel.TEXT, text="some body text")
++        body.prov = _prov(19)
++        _full_repair(doc)
++        texts_emitted = [c.text for c in HierarchicalChunker().chunk(doc) if c.text]
++        assert "" not in texts_emitted
++        assert texts_emitted == ["some body text"]
++
++
++# ---------------------------------------------------------------------------
++# Fix C — duplicate heading noise deleted, not re-promoted
++# ---------------------------------------------------------------------------
++
++class TestDuplicateHeadingNoise:
++    def test_trailing_atx_duplicate_is_stripped_not_repromoted(self):
++        doc = DoclingDocument(name="x")
++        prior = doc.add_text(
++            label=DocItemLabel.TEXT,
++            text="For each principle we will show you how to apply this with calisthenics.\n"
++                 "### **7.1 Consistency**",
++        )
++        prior.prov = _prov(18)
++        real_heading = doc.add_heading(text="7.1 Consistency", level=1)
++        real_heading.prov = _prov(18)
++        body = doc.add_text(label=DocItemLabel.TEXT, text="You will only see results if...")
++        body.prov = _prov(18)
++
++        _full_repair(doc)
++
++        headers = [t for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER]
++        assert [h.text for h in headers] == ["7.1 Consistency"]  # not duplicated
++        assert prior.text == "For each principle we will show you how to apply this with calisthenics."
++        chunk_texts = [c.text for c in HierarchicalChunker().chunk(doc)]
++        assert not any("###" in t or "**7.1" in t for t in chunk_texts)
++
++    def test_item_that_is_purely_duplicate_noise_becomes_empty_and_drops(self):
++        doc = DoclingDocument(name="x")
++        real_heading = doc.add_heading(text="8.1 Can you make muscles with calisthenics?", level=1)
++        real_heading.prov = _prov(22)
++        noise = doc.add_text(label=DocItemLabel.TEXT,
++                              text="### **8.1 Can you make muscles with calisthenics?**")
++        noise.prov = _prov(22)
++        body = doc.add_text(label=DocItemLabel.TEXT, text="Yes it is possible.")
++        body.prov = _prov(22)
++
++        _full_repair(doc)
++        chunk_texts = [c.text for c in HierarchicalChunker().chunk(doc) if c.text]
++        assert chunk_texts == ["Yes it is possible."]
++
++    def test_unmatched_hash_fragment_is_left_alone(self):
++        """A '#' fragment that doesn't correspond to any real heading elsewhere
++        is NOT deleted -- Fix C only strips confirmed duplicates."""
++        doc = DoclingDocument(name="x")
++        item = doc.add_text(label=DocItemLabel.TEXT, text="Room #42 was fully booked.\n### **Nonexistent**")
++        item.prov = _prov(1)
++        _full_repair(doc)
++        assert item.text == "Room #42 was fully booked.\n### **Nonexistent**"
++
++
++# ---------------------------------------------------------------------------
++# Fix D — genuinely-missing heading promoted
++# ---------------------------------------------------------------------------
++
++class TestMissingAllCapsHeadingPromoted:
++    def test_bold_allcaps_prefix_promoted_to_heading(self):
++        doc = DoclingDocument(name="x")
++        prior_heading = doc.add_heading(text="Beginners Circuit", level=1)
++        prior_heading.prov = _prov(17)
++        item = doc.add_text(
++            label=DocItemLabel.TEXT,
++            text="**10 CRUCIAL TRAINING PRINCIPLES You should implement all these "
++                 "principles to progress optimally!**",
++        )
++        item.prov = _prov(18)
++        first_principle = doc.add_heading(text="7.1 Consistency", level=1)
++        first_principle.prov = _prov(18)
++        body = doc.add_text(label=DocItemLabel.TEXT, text="You will only see results...")
++        body.prov = _prov(18)
++
++        _full_repair(doc)
++
++        heading_texts = [t.text for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER]
++        assert "10 CRUCIAL TRAINING PRINCIPLES" in heading_texts
++        chunk_by_body = {c.text: c.meta.headings for c in HierarchicalChunker().chunk(doc)}
++        # "10 CRUCIAL..." (level 1, unnumbered) and "7.1 Consistency" (level 2,
++        # from its one dot) are DIFFERENT levels, so both correctly stay active
++        # -- this mirrors "Beginners Circuit" (level 1) coexisting with numbered
++        # subsections in the real corpus.
++        assert chunk_by_body["You will only see results..."] == \
++            ["10 CRUCIAL TRAINING PRINCIPLES", "7.1 Consistency"]
++        remaining = [t for t in doc.texts
++                     if t.label in (DocItemLabel.PARAGRAPH, DocItemLabel.TEXT)
++                     and "CRUCIAL" in (t.text or "")]
++        assert remaining == []  # heading text removed from the paragraph, not duplicated
++
++    def test_ordinary_prose_is_not_mis_promoted(self):
++        doc = DoclingDocument(name="x")
++        item = doc.add_text(label=DocItemLabel.TEXT, text="The USA has many states.")
++        item.prov = _prov(1)
++        _full_repair(doc)
++        assert not [t for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER]
++        assert item.text == "The USA has many states."
++
++    def test_already_existing_heading_is_not_duplicated(self):
++        doc = DoclingDocument(name="x")
++        existing = doc.add_heading(text="ADVANCED CIRCUIT TRAINING", level=1)
++        existing.prov = _prov(1)
++        item = doc.add_text(
++            label=DocItemLabel.TEXT,
++            text="**ADVANCED CIRCUIT TRAINING Follow the routine below closely.**",
++        )
++        item.prov = _prov(2)
++        _full_repair(doc)
++        heading_texts = [t.text for t in doc.texts if t.label == DocItemLabel.SECTION_HEADER]
++        assert heading_texts.count("ADVANCED CIRCUIT TRAINING") == 1

@@ -1,10 +1,34 @@
 from typing import Any, Union
 
 from docling.chunking import HybridChunker
+from docling_core.transforms.chunker.hierarchical_chunker import (
+    ChunkingDocSerializer,
+    ChunkingSerializerProvider,
+)
+from docling_core.transforms.serializer.base import BaseTableSerializer
+from docling_core.transforms.serializer.markdown import MarkdownTableSerializer
 from docling_core.types.doc import DoclingDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import settings
+from core.chunk_cleanup import is_micro_label, postprocess_chunks  # v5.8
+
+
+class _MarkdownTableChunkSerializer(ChunkingDocSerializer):
+    """v5.7: serialise tables as markdown (header + rows) instead of 'row, col = value'.
+
+    The default triplet form keys every cell on column 1, which invents false pairs for
+    side-by-side or multi-block tables and cannot be split on a row boundary.  A markdown
+    table keeps each row intact and lets HybridChunker repeat the header row in every
+    chunk of a long table (repeat_table_header=True).
+    """
+
+    table_serializer: BaseTableSerializer = MarkdownTableSerializer()
+
+
+class _MarkdownTableSerializerProvider(ChunkingSerializerProvider):
+    def get_serializer(self, doc: DoclingDocument) -> ChunkingDocSerializer:
+        return _MarkdownTableChunkSerializer(doc=doc)
 
 
 class Chunker:
@@ -169,7 +193,11 @@ class Chunker:
         """
         from docling_core.types.doc import DocItemLabel
 
-        chunker = HybridChunker(tokenizer=settings.chunker_tokenizer)
+        chunker = HybridChunker(
+            tokenizer=settings.chunker_tokenizer,
+            serializer_provider=_MarkdownTableSerializerProvider(),  # v5.7
+            repeat_table_header=True,
+        )
         raw_chunks = list(chunker.chunk(doc))
 
         chunks: list[str] = []
@@ -226,6 +254,13 @@ class Chunker:
             metadatas.append(meta)
             chunks.append(text)
 
+        # v5.8: strip leaked '###' / '**', drop echoed next-heading tails and micro chunks.
+        # Runs BEFORE the Gap-B injection below so intentional heading-only chunks survive.
+        if settings.chunk_postprocess:
+            chunks, metadatas = postprocess_chunks(
+                chunks, metadatas, drop_micro=filename.lower().endswith(".pdf")
+            )
+
         # v2 fix (Gap B): heading-only slides produce no DocChunk at all.
         # Walk doc.texts for TITLE/SECTION_HEADER items not covered by any chunk
         # and inject them as synthetic text chunks so they are retrievable.
@@ -234,6 +269,11 @@ class Chunker:
                 continue
             heading_text = (item.text or "").strip()
             if heading_text and heading_text not in covered_headings:
+                # v5.8.1: a PDF heading item with no body and no place in any heading path is a
+                # running logo/label (e.g. 'Calisthenics Family' on the last page), not a section.
+                if settings.chunk_postprocess and filename.lower().endswith(".pdf") \
+                        and is_micro_label(heading_text):
+                    continue
                 # Page provenance for synthetic heading chunks
                 page: int | None = None
                 try:

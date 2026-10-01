@@ -1,0 +1,439 @@
+diff -ruN a/config.py b/config.py
+--- a/config.py	2026-10-01 06:54:18.207198061 +0000
++++ b/config.py	2026-10-01 06:55:27.489662702 +0000
+@@ -71,6 +71,8 @@
+     pdf_ocr_on_text_pages: bool = os.getenv("PDF_ALLOW_OCR_ON_TEXT_PAGES", "false").lower() == "true"
+     # v5.7 kill-switch for the text/markdown clean-up + structure passes.
+     pdf_v57_cleanup: bool = os.getenv("PDF_V57_CLEANUP", "true").lower() == "true"
++    # v5.8 kill-switch for the chunk-level sanitiser (core/chunk_cleanup.py).
++    chunk_postprocess: bool = os.getenv("CHUNK_POSTPROCESS", "true").lower() == "true"
+     # Max new tokens for SmolVLM inference on image-heavy PDF pages.
+     pdf_smolvlm_max_new_tokens: int = int(os.getenv("PDF_SMOLVLM_MAX_NEW_TOKENS", "200"))
+     # v5.2: minimum number of distinct pages a text string must appear on to be
+diff -ruN a/core/chunk_cleanup.py b/core/chunk_cleanup.py
+--- a/core/chunk_cleanup.py	1970-01-01 00:00:00.000000000 +0000
++++ b/core/chunk_cleanup.py	2026-10-01 06:55:27.489648279 +0000
+@@ -0,0 +1,52 @@
++"""v5.8 chunk-level sanitiser. Pure Python - no Docling imports, so it is unit-testable anywhere.
++
++HybridChunker re-serialises Docling items as markdown: an item carrying ``formatting`` comes out as
++``**text**`` and a stray ``###`` token survives as text.  This pass runs on the final chunk strings
++and removes that markup, drops a trailing line that is really the NEXT chunk's heading, and drops
++chunks that have become heading-only or are a stray one-line logo.
++"""
++from __future__ import annotations
++
++import re
++from typing import Any
++
++_ATX = re.compile(r"(?m)(?:^|(?<=[ \t]))(?:#{2,6}|#(?=[ \t]*\*\*))[ \t]*")
++_ITALIC = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
++_INNER_SPACES = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)")      # also collapses markdown-table padding
++
++
++def strip_markup(text: str) -> str:
++    """Remove leaked '###', '**bold**', '*italic*' and collapse inner runs of spaces."""
++    text = _ATX.sub("", text)
++    text = text.replace("**", "")
++    text = _ITALIC.sub(r"\1", text)
++    return _INNER_SPACES.sub(" ", text)
++
++
++def _norm(s: str) -> str:
++    return re.sub(r"\s+", " ", strip_markup(s)).strip().casefold()
++
++
++def postprocess_chunks(
++    chunks: list[str], metas: list[dict[str, Any]], *, drop_micro: bool = False
++) -> tuple[list[str], list[dict[str, Any]]]:
++    """Clean chunk strings; drop echo-only / micro chunks.  ``chunk_index`` is NOT renumbered here."""
++    lines = [strip_markup(c).strip().split("\n") for c in chunks]
++    out_chunks: list[str] = []
++    out_metas: list[dict[str, Any]] = []
++    for i, ls in enumerate(lines):
++        nxt = {_norm(x) for x in lines[i + 1][:3]} if i + 1 < len(lines) else set()
++        if len(ls) > 1 and nxt:
++            last = ls[-1].strip()
++            if last and len(last) <= 120 and not last.startswith("|") and _norm(last) in nxt:
++                ls = ls[:-1]                       # '... ### **3.2 Basics**' glued to previous chunk
++        norms = {_norm(x) for x in ls if x.strip()}
++        if nxt and norms and norms <= nxt:         # only headings left, and the next chunk has them
++            continue
++        text = "\n".join(ls).strip()
++        if drop_micro and "\n" not in text and len(text) < 40 and len(text.split()) <= 3 \
++                and not re.search(r"\d", text):
++            continue                               # e.g. a lone running logo 'Calisthenics Family'
++        out_chunks.append(text)
++        out_metas.append(metas[i])
++    return out_chunks, out_metas
+diff -ruN a/core/chunker.py b/core/chunker.py
+--- a/core/chunker.py	2026-10-01 06:54:18.207144590 +0000
++++ b/core/chunker.py	2026-10-01 06:55:27.489608554 +0000
+@@ -11,6 +11,7 @@
+ from langchain_text_splitters import RecursiveCharacterTextSplitter
+ 
+ from config import settings
++from core.chunk_cleanup import postprocess_chunks  # v5.8
+ 
+ 
+ class _MarkdownTableChunkSerializer(ChunkingDocSerializer):
+@@ -253,6 +254,13 @@
+             metadatas.append(meta)
+             chunks.append(text)
+ 
++        # v5.8: strip leaked '###' / '**', drop echoed next-heading tails and micro chunks.
++        # Runs BEFORE the Gap-B injection below so intentional heading-only chunks survive.
++        if settings.chunk_postprocess:
++            chunks, metadatas = postprocess_chunks(
++                chunks, metadatas, drop_micro=filename.lower().endswith(".pdf")
++            )
++
+         # v2 fix (Gap B): heading-only slides produce no DocChunk at all.
+         # Walk doc.texts for TITLE/SECTION_HEADER items not covered by any chunk
+         # and inject them as synthetic text chunks so they are retrievable.
+diff -ruN a/parsers/pdf_cleanup.py b/parsers/pdf_cleanup.py
+--- a/parsers/pdf_cleanup.py	2026-10-01 06:54:18.207235658 +0000
++++ b/parsers/pdf_cleanup.py	2026-10-01 06:55:27.489692158 +0000
+@@ -153,7 +153,7 @@
+ _SUP_TAG_RE = re.compile(r"</?sup>", re.I)
+ _BOLD_JOIN_RE = re.compile(r"\*\*\s+\*\*")                     # **a** **b** -> **a b**
+ _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+-_ATX_RE = re.compile(r"(?:(?<=\s)|^)#{2,6}\s*(?=\S)|(?:(?<=\s)|^)#\s*(?=\*\*)")
++_ATX_RE = re.compile(r"(?:(?<=\s)|^)(?:#{2,6}|#(?=\s*\*\*))\s*")   # v5.8: also a trailing '###'
+ _LEAD_BULLET_RE = re.compile(r"^\s*(?:>|[•·▪■◦])\s+")
+ 
+ 
+@@ -198,6 +198,7 @@
+     (re.compile(r"\bFlowever\b"), "However"),
+     (re.compile(r"\bTyperwriter\b"), "Typewriter"),
+     (re.compile(r"\bDicount\b|\bdicount\b"), "discount"),
++    (re.compile(r"\bTHEFULLJOURNEYTIMELINE\b"), "THE FULL JOURNEY TIMELINE"),
+ ]
+ PROMO_CODES: tuple[str, ...] = ("BEGINNER25", "FULLJOURNEY25", "BURNFAT25")
+ _CODE_RE = re.compile(r"(?i:\b(code)\b)(\s*[‘'’\"“]?\s*)([A-Za-z][A-Za-z0-9 ]{5,20}?)(?=\s*[‘'’\"”*]|\s+(?i:for|to)\b)")
+@@ -267,6 +268,9 @@
+ # Noise (photo OCR fragments) and running footers
+ # ----------------------------------------------------------------------------
+ 
++_JUNK_SYMBOLS = frozenset("^ ~ | _ » « ¦ ■ □".split())
++
++
+ def is_noise_paragraph(par: str) -> bool:
+     """True for photo-OCR debris such as '*<br>I<br>is<br>*' or 'ML m &\\n191 ...'.
+ 
+@@ -281,6 +285,11 @@
+     total = len(s.replace(" ", ""))
+     good = sum(len(w) for w in _WORD_RE.findall(s) if len(w) >= 3)
+     good += sum(len(n) for n in re.findall(r"\d+", s))
++    if total < 80:                                   # v5.8: button debris 'r ^ Start Now L J'
++        toks = s.split()
++        junk = sum(1 for t in toks if (len(t) == 1 and t.isalpha() and t not in "aAI") or t in _JUNK_SYMBOLS)
++        if len(toks) >= 3 and junk / len(toks) >= 0.4:
++            return True
+     return total > 0 and good / total < 0.6 and total < 80
+ 
+ 
+@@ -458,6 +467,27 @@
+     return [block[a:b] for a, b in zip(edges, edges[1:]) if b > a]
+ 
+ 
++_TOC_FIRST_RE = re.compile(r"^(?P<n>\d{1,2}|(?:[Il1]\s?){1,3})\s*\.?\s+(?P<t>\S.*)$")
++
++
++def _try_toc(rows: list[list[str]]) -> list[list[str]] | None:
++    """'I. Introduction | 4', 'I I. Equipment | 34' ... -> [['1.', 'Introduction', '4'], ...] or None."""
++    if len(rows) < 4 or any(len(r) != 2 or not r[1].strip().isdigit() for r in rows):
++        return None
++    parsed = []
++    for r in rows:
++        m = _TOC_FIRST_RE.match(r[0].strip())
++        if not m:
++            return None
++        n = m["n"]
++        parsed.append((int(n) if n.isdigit() else int("1" * len(re.findall(r"[Il1]", n))), m["t"].strip(), r[1].strip()))
++    pages = [int(p[2]) for p in parsed]
++    if pages != sorted(pages):
++        return None
++    sequential = sum(p[0] == i + 1 for i, p in enumerate(parsed)) >= 0.6 * len(parsed)
++    return [[f"{(i + 1) if sequential else p[0]}.", p[1], p[2]] for i, p in enumerate(parsed)]
++
++
+ def _emit_clean_table(block: list[str], out: list[str], vocab: Counter | None) -> None:
+     """Clean one pipe table (``block``) and append its markdown lines to ``out``."""
+     if True:
+@@ -469,7 +499,10 @@
+         width = max(len(r) for r in raw)
+         raw = [r + [""] * (width - len(r)) for r in raw]
+         header, rows = raw[0], raw[1:]
+-        if width >= 3 and re.match(r"^(\d+|I+|l+)\.?$", header[0]) and header[0]:
++        toc = _try_toc(raw)
++        if toc is not None:                           # v5.8: two-column contents table
++            header, rows = ["No.", "Section", "Page"], toc
++        elif width >= 3 and re.match(r"^(\d+|I+|l+)\.?$", header[0]) and header[0]:
+             # contents table: no real header row -> treat every row as data
+             rows = _fix_toc_rows([header] + rows)
+             header = ["No.", "Section", "Page"][:width] + [""] * max(0, width - 3)
+@@ -518,3 +551,55 @@
+     par = apply_known_fixes(par)
+     par = re.sub(r"(?<=\S)[ \t]+###\s*\*{0,2}[^\n*]+\*{0,2}\s*$", "", par)   # glued duplicate heading
+     return fix_lost_spaces(par, vocab) if vocab else par
++
++
++# ----------------------------------------------------------------------------
++# v5.8: heading numbers and sequence labels (pure string functions)
++# ----------------------------------------------------------------------------
++_BROKEN_NUM_RE = re.compile(r"^(?P<a>\d+(?:\.\d+)+)\.\s*(?P<b>\d+)\s*(?=[A-Za-z])")
++_NUM_HEAD_RE = re.compile(r"^(\d+(?:\.\d+)+)(\s+\S.*)$")
++_SEQ_LABEL_RE = re.compile(r"^(Day|Week|Round|Step)\s+(\d+)$")
++
++
++def fix_heading_number(text: str) -> str:
++    """'6.5. 1Chest Circuit' -> '6.5.1 Chest Circuit'."""
++    t = text.strip()
++    m = _BROKEN_NUM_RE.match(t)
++    return f"{m['a']}.{m['b']} {t[m.end():]}" if m else text
++
++
++def repair_heading_sequence(texts: list[str]) -> list[str]:
++    """'6.5 ...', '6.5.1 ...', then '6.2.2 ...' -> '6.5.2 ...'.
++
++    A 3-level number whose chapter matches the last 2-level heading but whose second part is
++    LOWER than it is a typo in the source; it takes the last 2-level prefix.  A higher second
++    part (a missing parent heading) is left alone.
++    """
++    out: list[str] = []
++    last2: list[str] | None = None
++    for t in texts:
++        m = _NUM_HEAD_RE.match(t.strip())
++        if not m:
++            out.append(t)
++            continue
++        parts = m.group(1).split(".")
++        if len(parts) == 2:
++            last2 = parts
++        elif last2 and len(parts) >= 3 and parts[0] == last2[0] and parts[1] != last2[1] \
++                and int(parts[1]) < int(last2[1]):
++            t = ".".join([*last2, *parts[2:]]) + m.group(2)
++        out.append(t)
++    return out
++
++
++def renumber_sequence(labels: list[str]) -> list[str]:
++    """['Day 7', 'Day 2'] -> ['Day 1', 'Day 2'] when at most one third of the numbers are wrong."""
++    ms = [_SEQ_LABEL_RE.match(x.strip()) for x in labels]
++    if len(labels) < 2 or not all(ms) or len({m[1] for m in ms}) != 1:
++        return list(labels)
++    nums = [int(m[2]) for m in ms]
++    expected = list(range(1, len(nums) + 1))
++    bad = sum(a != b for a, b in zip(nums, expected))
++    if 0 < bad <= max(1, len(nums) // 3):
++        return [f"{ms[0][1]} {e}" for e in expected]
++    return list(labels)
+diff -ruN a/parsers/pdf_structure.py b/parsers/pdf_structure.py
+--- a/parsers/pdf_structure.py	2026-10-01 06:54:18.207268654 +0000
++++ b/parsers/pdf_structure.py	2026-10-01 06:55:27.489737568 +0000
+@@ -101,6 +101,9 @@
+ 
+ def clean_text_items(doc: DoclingDocument, vocab: Counter | None = None) -> None:
+     """Normalise every text-like item; blank photo noise and doubled paragraphs."""
++    for it in doc.texts:                       # v5.8: HybridChunker re-adds '**' from .formatting
++        if getattr(it, "formatting", None) is not None:
++            it.formatting = None
+     # headings first, so paragraphs can be checked for trailing heading echoes
+     for it in list(doc.texts):
+         if it.label in _SKIP_CLEAN or not (it.text or "").strip():
+@@ -202,6 +205,7 @@
+     it with the table instead of gluing it to whatever chunk came before.
+     """
+     seq = _sequence(doc)
++    all_bound: list[TextItem] = []
+     i = 0
+     while i < len(seq):
+         if not isinstance(seq[i], TableItem):
+@@ -226,23 +230,22 @@
+                 _swap(doc, cap, new_cap)
+                 tbl.captions = [*tbl.captions, RefItem(cref=new_cap.self_ref)]
+                 bound.append(new_cap)
+-            _renumber_sequence_captions(bound)
++            all_bound.extend(bound)
+         i = j
++    by_page: dict[int | None, list[TextItem]] = {}
++    for cap in all_bound:                       # v5.8: renumber per page, not per table group
++        by_page.setdefault(_page(cap), []).append(cap)
++    for caps in by_page.values():
++        _renumber_sequence_captions(caps)
+ 
+ 
+ def _renumber_sequence_captions(caps: list[TextItem]) -> None:
+     """'Day 7', 'Day 2' (OCR read a '1' as '7') -> 'Day 1', 'Day 2'."""
+-    if len(caps) < 2:
+-        return
+-    m = [_DAY_RE.match((c.text or "").strip()) for c in caps]
+-    if not all(m) or len({x.group(1) for x in m}) != 1:
+-        return
+-    nums = [int(x.group(2)) for x in m]
+-    expected = list(range(1, len(caps) + 1))
+-    if nums != expected and sorted(nums) != nums or (nums != expected and nums[0] not in (0, 1)):
+-        for c, n in zip(caps, expected):
+-            c.text = f"{m[0].group(1)} {n}"
+-            c.orig = c.text
++    new = cleanup.renumber_sequence([(c.text or "") for c in caps])
++    for c, t in zip(caps, new):
++        if t != c.text:
++            c.text = t
++            c.orig = t
+ 
+ 
+ # ----------------------------------------------------------------------------
+@@ -320,9 +323,20 @@
+ # entry point
+ # ----------------------------------------------------------------------------
+ 
++def repair_heading_numbers(doc: DoclingDocument) -> None:
++    """v5.8: '6.5. 1Chest Circuit' -> '6.5.1 Chest Circuit'; '6.2.2' after '6.5.1' -> '6.5.2'."""
++    heads = [it for it in _sequence(doc) if _is_heading(it) and (it.text or "").strip()]
++    texts = cleanup.repair_heading_sequence([cleanup.fix_heading_number((h.text or "").strip()) for h in heads])
++    for h, t in zip(heads, texts):
++        if t != h.text:
++            h.text = t
++            h.orig = t
++
++
+ def repair_pdf_structure(doc: DoclingDocument, vocab: Counter | None = None) -> None:
+     """Run every v5.7 document-level pass in dependency order."""
+     clean_text_items(doc, vocab)
++    repair_heading_numbers(doc)
+     demote_pseudo_headings(doc)
+     bind_captions(doc)
+     relevel_headings(doc)
+diff -ruN a/tests/parsing_arch/v5_8/__init__.py b/tests/parsing_arch/v5_8/__init__.py
+--- a/tests/parsing_arch/v5_8/__init__.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/parsing_arch/v5_8/__init__.py	2026-10-01 06:55:27.489783181 +0000
+@@ -0,0 +1 @@
++"""v5.8 tests."""
+diff -ruN a/tests/parsing_arch/v5_8/test_v58_repairs.py b/tests/parsing_arch/v5_8/test_v58_repairs.py
+--- a/tests/parsing_arch/v5_8/test_v58_repairs.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/parsing_arch/v5_8/test_v58_repairs.py	2026-10-01 06:55:27.489795694 +0000
+@@ -0,0 +1,85 @@
++"""v5.8 regression tests. Pure modules are loaded by path, so no Docling install is needed."""
++import importlib.util
++import pathlib
++
++ROOT = pathlib.Path(__file__).resolve().parents[3]
++
++
++def _load(rel, name):
++    spec = importlib.util.spec_from_file_location(name, ROOT / rel)
++    mod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(mod)
++    return mod
++
++
++cc = _load("core/chunk_cleanup.py", "chunk_cleanup")
++pc = _load("parsers/pdf_cleanup.py", "pdf_cleanup_v58")
++
++
++def test_strip_markup_removes_hashes_bold_italic():
++    t = "a. ###\n### **3.2 Basics**\n**bold**\n*Use Code X*\n* real bullet\n6*7*8 and #1 tip"
++    out = cc.strip_markup(t)
++    assert "#" not in out.replace("#1", "") and "**" not in out
++    assert "Use Code X" in out and "* real bullet" in out and "6*7*8" in out and "#1 tip" in out
++
++
++def test_trailing_hash_token_stripped_by_cleanup():
++    assert "###" not in pc.strip_markup("about calisthenics. ###")
++
++
++def test_next_heading_tail_and_heading_only_chunk_dropped():
++    chunks = [
++        "WHAT IS\n3.1 Origins\nBody text.\n### **3.2 Basics**",
++        "WHAT IS\n3.2 Basics\nWith the basics we mean push ups.",
++        "MYTHS\n### **8.1 Can you?**",
++        "MYTHS\n8.1 Can you?\nYes.",
++        "Calisthenics Family",
++    ]
++    metas = [{"i": i} for i in range(len(chunks))]
++    out, m = cc.postprocess_chunks(chunks, metas, drop_micro=True)
++    assert out[0].endswith("Body text.") and len(out) == 3
++    assert [x["i"] for x in m] == [0, 1, 3]
++    assert len(cc.postprocess_chunks(chunks, metas, drop_micro=False)[0]) == 4
++
++
++def test_table_row_equal_to_next_header_is_kept():
++    chunks = ["H\n| a | b |\n| 1 | 2 |", "H\n| 1 | 2 |\n| 3 | 4 |"]
++    out, _ = cc.postprocess_chunks(chunks, [{}, {}])
++    assert out[0].endswith("| 1 | 2 |")
++
++
++def test_two_column_contents_table():
++    md = ("|I. Introduction|4|\n|---|---|\n|2 About Us|5|\n|3 What is It|7|\n|7. 10 Crucial Principles|18|\n"
++          "|10. Workout Programs|30|\n|I I. Equipment & Apparel|34|\n|12. Words of Encouragement|36|")
++    out = pc.clean_markdown_tables(md)
++    assert "| 1. | Introduction | 4 |" in out and "| 7. | 10 Crucial Principles | 18 |" in out
++    assert "| 11. | Equipment & Apparel | 34 |" in out and "| 12. | Words of Encouragement | 36 |" in out
++
++
++def test_non_toc_two_column_table_untouched():
++    md = "|Fish|Protein|\n|---|---|\n|Tuna|25|\n|Cod|18|\n|Eel|20|"
++    assert "| Fish | Protein |" in pc.clean_markdown_tables(md)
++
++
++def test_heading_number_repairs():
++    assert pc.fix_heading_number("6.5. 1Chest Circuit") == "6.5.1 Chest Circuit"
++    assert pc.fix_heading_number("9.4.2 Proteins") == "9.4.2 Proteins"
++    seq = ["6.5 Circuit Training", "6.5.1 Chest Circuit", "6.2.2 Core Circuit", "7 Principles"]
++    assert pc.repair_heading_sequence(seq)[2] == "6.5.2 Core Circuit"
++    assert pc.repair_heading_sequence(["9.3 Calories", "9.4.1 Carbs"]) == ["9.3 Calories", "9.4.1 Carbs"]
++
++
++def test_renumber_sequence():
++    assert pc.renumber_sequence(["Day 7", "Day 2"]) == ["Day 1", "Day 2"]
++    assert pc.renumber_sequence(["Day 3", "Day 4"]) == ["Day 3", "Day 4"]
++    assert pc.renumber_sequence(["Day 7"]) == ["Day 7"]
++
++
++def test_button_debris_is_noise_but_normal_text_is_not():
++    assert pc.is_noise_paragraph("r ^ Start Now L J")
++    assert not pc.is_noise_paragraph("Step 2 of 4")
++    assert not pc.is_noise_paragraph("Day 1 - Skill")
++
++
++def test_known_fix_timeline_heading():
++    assert pc.apply_known_fixes("THEFULLJOURNEYTIMELINE") == "THE FULL JOURNEY TIMELINE"
+diff -ruN a/tests/parsing_arch/v5_8/verify_v5_8.py b/tests/parsing_arch/v5_8/verify_v5_8.py
+--- a/tests/parsing_arch/v5_8/verify_v5_8.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/parsing_arch/v5_8/verify_v5_8.py	2026-10-01 06:55:27.489806889 +0000
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python3
++"""Run the real PDF through router + chunker; PASS/FAIL the v5.8 checklist; dump v5_8_chunks.txt.
++Usage (project root, PowerShell: $env:PYTHONUTF8=1):  python tests/parsing_arch/v5_8/verify_v5_8.py <pdf>"""
++import pathlib, re, sys
++
++from core.chunker import Chunker
++from parsers.pdf_router import PdfPageRouter
++
++pdf = pathlib.Path(sys.argv[1])
++doc = PdfPageRouter().parse(pdf.read_bytes(), pdf.name)
++chunks, metas, _ = Chunker().split(doc, "verify", pdf.name)
++allt = "\n".join(chunks)
++checks = {
++    "no leaked ### / ** / *italic*": not re.search(r"###|\*\*|(?<!\w)\*\w", allt),
++    "no chunk ends with the next chunk's heading": not any(
++        re.search(r"\n\d+(\.\d+)* [^\n]{3,80}$", c) and c.split("\n")[-1] in chunks[i + 1].split("\n")[:3]
++        for i, c in enumerate(chunks[:-1])),
++    "no heading-only / micro chunks": all(len(c.split("\n")) > 1 or len(c) >= 40 for c in chunks),
++    "contents table numbered": bool(re.search(r"\|\s*12\.\s*\|\s*Words of Encouragement\s*\|\s*36\s*\|", allt))
++        and bool(re.search(r"\|\s*1\.\s*\|\s*Introduction\s*\|\s*4\s*\|", allt)),
++    "6.5.1 Chest / 6.5.2 Core headings": "6.5.1 Chest Circuit" in allt and "6.5.2 Core Circuit" in allt
++        and "6.2.2" not in allt and "1Chest" not in allt,
++    "Day 1 / Day 2 nutrition captions": bool(re.search(r"9\.8[^\n]*\nDay 1\b", allt)) and "Day 7" not in allt,
++    "no button debris": "r ^ Start Now" not in allt,
++    "chunk_index == position": all(m["chunk_index"] == i for i, m in enumerate(metas)),
++}
++for name, ok in checks.items():
++    print(("PASS  " if ok else "FAIL  ") + name)
++pathlib.Path("v5_8_chunks.txt").write_text(
++    "\n".join(f"===== #{i} p{m.get('page_numbers')}\n{c}" for i, (c, m) in enumerate(zip(chunks, metas), 1)),
++    encoding="utf-8")
++print(f"{len(chunks)} chunks written to v5_8_chunks.txt")
++sys.exit(0 if all(checks.values()) else 1)

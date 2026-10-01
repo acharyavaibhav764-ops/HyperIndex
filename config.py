@@ -63,6 +63,16 @@ class Settings:
     # (ratio vs page area), which required ~25,000 chars on A4 to clear the bar —
     # far beyond realistic page density.  Tune against real Honeywell manual pages.
     pdf_min_text_chars_for_text_route: int = int(os.getenv("PDF_MIN_TEXT_CHARS_FOR_TEXT_ROUTE", "800"))
+    # v5.7: a page whose text layer has at least this many characters is read from that
+    # layer.  Docling's OCR is switched off for such pages (the PDF is often a full-page
+    # bitmap with an embedded text layer; OCR over it replaced good text with garbage).
+    pdf_text_layer_min_chars: int = int(os.getenv("PDF_TEXT_LAYER_MIN_CHARS", "40"))
+    # v5.7 kill-switch: set PDF_ALLOW_OCR_ON_TEXT_PAGES=true to restore the v5.6 OCR behaviour.
+    pdf_ocr_on_text_pages: bool = os.getenv("PDF_ALLOW_OCR_ON_TEXT_PAGES", "false").lower() == "true"
+    # v5.7 kill-switch for the text/markdown clean-up + structure passes.
+    pdf_v57_cleanup: bool = os.getenv("PDF_V57_CLEANUP", "true").lower() == "true"
+    # v5.8 kill-switch for the chunk-level sanitiser (core/chunk_cleanup.py).
+    chunk_postprocess: bool = os.getenv("CHUNK_POSTPROCESS", "true").lower() == "true"
     # Max new tokens for SmolVLM inference on image-heavy PDF pages.
     pdf_smolvlm_max_new_tokens: int = int(os.getenv("PDF_SMOLVLM_MAX_NEW_TOKENS", "200"))
     # v5.2: minimum number of distinct pages a text string must appear on to be
