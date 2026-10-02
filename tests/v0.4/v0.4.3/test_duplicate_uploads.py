@@ -75,7 +75,7 @@ class FakeRetriever:
 
 
 class TestDuplicateUploads(unittest.TestCase):
-    def test_identical_files_in_one_request_are_only_stored_once(self) -> None:
+    def setUp(self) -> None:
         original_services = (
             documents_endpoint.uploader,
             documents_endpoint.parser,
@@ -89,40 +89,65 @@ class TestDuplicateUploads(unittest.TestCase):
         documents_endpoint.chunker = FakeChunker()
         documents_endpoint.embeddings = FakeEmbeddings()
         documents_endpoint.retriever = FakeRetriever()
+        self.original_services = original_services
+        self.uploader = uploader
 
-        engine = create_engine("sqlite://", poolclass=StaticPool)
-        Base.metadata.create_all(engine)
-        session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-        db = session_factory()
+        self.engine = create_engine("sqlite://", poolclass=StaticPool)
+        Base.metadata.create_all(self.engine)
+        session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
+        self.db = session_factory()
 
-        try:
-            content = b"same exact document bytes"
-            response = asyncio.run(
-                documents_endpoint.ingest_documents(
-                    [
-                        FakeFile("manual-a.txt", content),
-                        FakeFile("manual-b.txt", content),
-                        FakeFile("manual-c.txt", content),
-                    ],
-                    "product-test",
-                    db,
-                )
+    def tearDown(self) -> None:
+        self.db.close()
+        self.engine.dispose()
+        (
+            documents_endpoint.uploader,
+            documents_endpoint.parser,
+            documents_endpoint.chunker,
+            documents_endpoint.embeddings,
+            documents_endpoint.retriever,
+        ) = self.original_services
+
+    def test_identical_files_in_one_request_are_only_stored_once(self) -> None:
+        content = b"same exact document bytes"
+        response = asyncio.run(
+            documents_endpoint.ingest_documents(
+                [
+                    FakeFile("manual-a.txt", content),
+                    FakeFile("manual-b.txt", content),
+                    FakeFile("manual-c.txt", content),
+                ],
+                "product-test",
+                self.db,
             )
+        )
 
-            self.assertEqual(
-                [item.status for item in response.documents],
-                ["indexed", "duplicate", "duplicate"],
+        self.assertEqual(
+            [item.status for item in response.documents],
+            ["indexed", "duplicate", "duplicate"],
+        )
+        self.assertEqual(len({item.document_id for item in response.documents}), 1)
+        self.assertEqual(self.uploader.upload_calls, 1)
+        self.assertEqual(self.db.query(DocumentVersion).count(), 1)
+
+    def test_same_file_can_be_uploaded_for_different_products(self) -> None:
+        content = b"same exact bytes for two products"
+        first_response = asyncio.run(
+            documents_endpoint.ingest_documents(
+                [FakeFile("manual.txt", content)], "product-a", self.db
             )
-            self.assertEqual(len({item.document_id for item in response.documents}), 1)
-            self.assertEqual(uploader.upload_calls, 1)
-            self.assertEqual(db.query(DocumentVersion).count(), 1)
-        finally:
-            db.close()
-            engine.dispose()
-            (
-                documents_endpoint.uploader,
-                documents_endpoint.parser,
-                documents_endpoint.chunker,
-                documents_endpoint.embeddings,
-                documents_endpoint.retriever,
-            ) = original_services
+        )
+        second_response = asyncio.run(
+            documents_endpoint.ingest_documents(
+                [FakeFile("manual.txt", content)], "product-b", self.db
+            )
+        )
+
+        self.assertEqual(first_response.documents[0].status, "indexed")
+        self.assertEqual(second_response.documents[0].status, "indexed")
+        self.assertNotEqual(
+            first_response.documents[0].document_id,
+            second_response.documents[0].document_id,
+        )
+        self.assertEqual(self.uploader.upload_calls, 2)
+        self.assertEqual(self.db.query(DocumentVersion).count(), 2)

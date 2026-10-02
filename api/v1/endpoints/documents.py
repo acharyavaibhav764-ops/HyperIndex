@@ -42,7 +42,12 @@ async def ingest_documents(
         await file.seek(0)
         file_hash = calculate_sha256(content)
         existing_version = db.scalar(
-            select(DocumentVersion).where(DocumentVersion.sha256 == file_hash)
+            select(DocumentVersion)
+            .join(Document)
+            .where(
+                DocumentVersion.sha256 == file_hash,
+                Document.product_id == product_id,
+            )
         )
         if existing_version is not None:
             existing_document = db.get(Document, existing_version.document_id)
