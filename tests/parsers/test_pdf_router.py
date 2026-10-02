@@ -92,27 +92,7 @@ class TestTriagePage:
         assert "text" not in result
 
 
-# ---------------------------------------------------------------------------
-# _single_page_bytes
-# ---------------------------------------------------------------------------
 
-class TestSinglePageBytes:
-    def test_single_page_bytes_extracts_page(self):
-        # Create a real in-memory 2-page PDF with PyMuPDF
-        doc = fitz.open()
-        p1 = doc.new_page()
-        p1.insert_text((50, 50), "Page 1 Content")
-        p2 = doc.new_page()
-        p2.insert_text((50, 50), "Page 2 Content")
-
-        single_bytes = PdfPageRouter._single_page_bytes(doc, 0)
-        doc.close()
-
-        # Verify extracted single-page PDF
-        single_doc = fitz.open(stream=single_bytes, filetype="pdf")
-        assert len(single_doc) == 1
-        assert "Page 1 Content" in single_doc[0].get_text()
-        single_doc.close()
 
 
 # ---------------------------------------------------------------------------

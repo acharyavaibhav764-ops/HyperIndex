@@ -47,37 +47,15 @@ class Settings:
     libreoffice_binary: str = os.getenv("LIBREOFFICE_BINARY", "")
     libreoffice_timeout_seconds: int = int(os.getenv("LIBREOFFICE_TIMEOUT_SECONDS", "60"))
 
-    # Parsing Architecture v5 — PDF per-page triage (PdfPageRouter)
-    # Set ENABLE_PDF_PAGE_ROUTER=true to activate per-page routing.
-    # When false, PdfPageRouter falls back to full-document Docling conversion (stub-compatible).
     enable_pdf_page_router: bool = (
         os.getenv("ENABLE_PDF_PAGE_ROUTER", "true").lower() == "true"
     )
-    # v5.1: absolute character count below which a page with an image is classified
-    # as image-heavy and routed to SmolVLM. Replaces the old pdf_text_ratio_threshold
-    # (ratio vs page area), which required ~25,000 chars on A4 to clear the bar —
-    # far beyond realistic page density. Tune against real Honeywell manual pages.
     pdf_min_text_chars_for_text_route: int = int(os.getenv("PDF_MIN_TEXT_CHARS_FOR_TEXT_ROUTE", "800"))
-    # v5.7: a page whose text layer has at least this many characters is read from that
-    # layer. Docling's OCR is switched off for such pages (the PDF is often a full-page
-    # bitmap with an embedded text layer; OCR over it replaced good text with garbage).
     pdf_text_layer_min_chars: int = int(os.getenv("PDF_TEXT_LAYER_MIN_CHARS", "40"))
-    # v5.7 kill-switch: set PDF_ALLOW_OCR_ON_TEXT_PAGES=true to restore the v5.6 OCR behaviour.
     pdf_ocr_on_text_pages: bool = os.getenv("PDF_ALLOW_OCR_ON_TEXT_PAGES", "false").lower() == "true"
-    # v5.7 kill-switch for the text/markdown clean-up + structure passes.
-    pdf_v57_cleanup: bool = os.getenv("PDF_V57_CLEANUP", "true").lower() == "true"
-    # v5.8 kill-switch for the chunk-level sanitiser (core/chunk_cleanup.py).
     chunk_postprocess: bool = os.getenv("CHUNK_POSTPROCESS", "true").lower() == "true"
-    # Max new tokens for SmolVLM inference on image-heavy PDF pages.
     pdf_smolvlm_max_new_tokens: int = int(os.getenv("PDF_SMOLVLM_MAX_NEW_TOKENS", "200"))
-    # v5.2: minimum number of distinct pages a text string must appear on to be
-    # classified as boilerplate (running header/footer) and demoted from
-    # SECTION_HEADER/TITLE to PARAGRAPH by _repair_pdf_headings().
     pdf_boilerplate_min_page_repeats: int = int(os.getenv("PDF_BOILERPLATE_MIN_PAGE_REPEATS", "3"))
-    # v5.4: diagnostic flag — when set to 1, _merge_pages() logs heading levels
-    # and orphan-check indices so the heading-freeze and tail-ordering bugs can be
-    # traced. Off by default; set PDF_DEBUG_HEADING_DUMP=1 when running test_parse.py
-    # to collect the diagnostic output. Never enable in production.
     pdf_debug_heading_dump: bool = bool(int(os.getenv("PDF_DEBUG_HEADING_DUMP", "0")))
 
 

@@ -42,7 +42,7 @@ Establish the entry point for PDF processing: register `PdfPageRouter` in the ce
 
 ### 2. Relevant Code to Retrieve
 - **Files**:
-  - `parsers/pdf_router.py`: Class definition `PdfPageRouter`, `can_handle()`, `_single_page_bytes()`, and `_triage_page()`.
+  - `parsers/pdf_router.py`: Class definition `PdfPageRouter`, `can_handle()`, and `_triage_page()`.
   - `parsers/router.py`: Registration of `PdfPageRouter` replacing `PdfStubParser`.
   - `config.py`: Triage threshold settings (`enable_pdf_page_router`, `pdf_min_text_chars_for_text_route`, `pdf_page_budget`).
 
@@ -91,7 +91,7 @@ Extract complex tables using Docling's structural table model, while preventing 
 
 ### 2. Relevant Code to Retrieve
 - **Files**:
-  - `parsers/pdf_router.py`: `_docling_page()`, `_build_text_layer_converter()`, `_build_docling_converter()`.
+  - `parsers/pdf_router.py`: `_single_page_bytes()`, `_docling_page()`, `_build_text_layer_converter()`, `_build_docling_converter()`.
   - `config.py`: `pdf_text_layer_min_chars` (default: 40), `pdf_allow_ocr_on_text_pages` (default: False).
 
 ### 3. Key Mechanics to Understand
