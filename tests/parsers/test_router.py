@@ -21,6 +21,7 @@ from core.parsers.docling_parser import DoclingParser
 from core.parsers.libreoffice_converter import LibreOfficeConverter
 from core.parsers.router import ParserRouter, UnsupportedFileError
 from core.parsers.text import TextParser
+from core.parsers.pdf_router import PdfPageRouter
 
 
 @pytest.fixture()
@@ -54,10 +55,13 @@ class TestParserRouterGetParser:
         with pytest.raises(UnsupportedFileError):
             router.get_parser("report.xyz")
 
-    def test_pdf_unsupported(self, router):
-        """PDF is not yet supported in v2 — must raise UnsupportedFileError."""
-        with pytest.raises(UnsupportedFileError):
-            router.get_parser("file.pdf")
+    def test_pdf_routes_to_pdf_page_router(self, router):
+        """PDF routes to PdfPageRouter."""
+        parser = router.get_parser("file.pdf")
+        assert isinstance(parser, PdfPageRouter)
+
+    def test_case_insensitive_pdf(self, router):
+        assert isinstance(router.get_parser("REPORT.PDF"), PdfPageRouter)
 
     def test_doc_routes_to_libreoffice_converter(self, router):
         parser = router.get_parser("file.doc")
@@ -99,7 +103,7 @@ class TestParserRouterParse:
 
     def test_parse_unsupported_raises(self, router):
         with pytest.raises(UnsupportedFileError):
-            router.parse(b"%PDF-1.4", "file.pdf")
+            router.parse(b"dummy bytes", "file.xyz")
 
     def test_parse_docx_returns_document(self, router):
         doc_obj = _docx.Document()

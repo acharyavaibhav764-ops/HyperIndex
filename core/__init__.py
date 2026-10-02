@@ -10,6 +10,7 @@ from .parsers import (
     LibreOfficeConverter,
     LibreOfficeNotFoundError,
     LibreOfficeConversionError,
+    PdfPageRouter,
 )
 
 from .chunker import Chunker
@@ -30,6 +31,7 @@ __all__ = [
     "LibreOfficeConverter",
     "LibreOfficeNotFoundError",
     "LibreOfficeConversionError",
+    "PdfPageRouter",
 
     "Chunker",
     "Embeddings",

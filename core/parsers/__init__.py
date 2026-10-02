@@ -7,6 +7,7 @@ from .libreoffice_converter import (
 )
 from .router import ParserRouter, UnsupportedFileError
 from .text import TextParser
+from .pdf_router import PdfPageRouter
 
 __all__ = [
     "BaseParser",
@@ -15,6 +16,8 @@ __all__ = [
     "LibreOfficeConverter",
     "LibreOfficeNotFoundError",
     "TextParser",
+    "PdfPageRouter",
     "ParserRouter",
     "UnsupportedFileError",
 ]
+
