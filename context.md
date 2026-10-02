@@ -71,7 +71,7 @@ Out of the 60 files modified on `parser_v1`, ignore the intermediate `.patch` fi
 | Phase | Description | Status | Completed At | Key Files Touched |
 |---|---|---|---|---|
 | **Phase 1** | Router Skeleton, Registration & Page Triage | `[COMPLETED]` | 2026-10-02 | `core/parsers/pdf_router.py`, `core/parsers/router.py`, `config.py`, `docs/parser/v5_phase1_router_triage.md` |
-| **Phase 2** | Fast-Text Path & Page Provenance Stamping | `[PENDING]` | - | `parsers/pdf_router.py` |
+| **Phase 2** | Fast-Text Path & Page Provenance Stamping | `[COMPLETED]` | 2026-10-02 | `core/parsers/pdf_router.py`, `docs/parser/v5_phase2_fast_text_and_provenance.md`, `tests/parsers/test_pdf_router.py` |
 | **Phase 3** | Table Tier & Native Text-Layer Protection | `[PENDING]` | - | `parsers/pdf_router.py`, `config.py` |
 | **Phase 4** | Visual/Image Tier (SmolVLM Captioning) | `[PENDING]` | - | `parsers/pdf_router.py`, `config.py` |
 | **Phase 5** | Pre-Merge Text Sanitization (`pdf_cleanup.py`) | `[PENDING]` | - | `parsers/pdf_cleanup.py` |
@@ -80,9 +80,10 @@ Out of the 60 files modified on `parser_v1`, ignore the intermediate `.patch` fi
 | **Phase 8** | API Wire-Up, Full Config Reference & Verification | `[PENDING]` | - | `api/...`, `config.py`, tests |
 
 ### Active Phase Pointer
-**Current Active Phase:** **Phase 2 (Fast-Text Path & Page Provenance Stamping)**
+**Current Active Phase:** **Phase 3 (Table Tier & Native Text-Layer Protection)**
 
 ### Session Notes & Log
 *(Agents should append brief bullet points here when completing a phase)*
 - **Baseline Set (2026-10-02):** Initialized `summary.md`, `crux.md`, `pdf_doc_phases.md`, and `context.md`. Full context audited against commit `2dadc28c` through `8a523c4`.
 - **Phase 1 Completed (2026-10-02):** Implemented `PdfPageRouter` skeleton (`can_handle`, `_triage_page`, `_docling_full`), registered `PdfPageRouter` in `core.parsers.router`, added PDF configuration settings to `config.py`, documented triage decision tree in `docs/parser/v5_phase1_router_triage.md`, and verified unit tests. Note: `_single_page_bytes()` was deferred to Phase 3/4 where per-page Docling/SmolVLM extraction actually requires it.
+- **Phase 2 Completed (2026-10-02):** Implemented fast-text markdown extraction via `pymupdf4llm` in `_page_markdown()`, implemented isolated per-page markdown streams with explicit `ProvenanceItem` stamping across `page_doc.iterate_items()` in `_merge_pages()`, added documentation in `docs/parser/v5_phase2_fast_text_and_provenance.md`, and verified all 11 unit tests pass.

@@ -122,3 +122,53 @@ class TestParseFallback:
             router.parse(b"dummy", "test.pdf")
             mock_fitz_open.assert_not_called()
 
+
+# ---------------------------------------------------------------------------
+# Phase 2: _page_markdown & _merge_pages (Page Provenance Stamping)
+# ---------------------------------------------------------------------------
+
+class TestPageMarkdown:
+    @patch("core.parsers.pdf_router.pymupdf4llm.to_markdown")
+    def test_page_markdown_calls_pymupdf4llm(self, mock_to_md):
+        mock_to_md.return_value = "# Header\n\nContent"
+        mock_pdf = MagicMock(spec=fitz.Document)
+
+        md = PdfPageRouter._page_markdown(mock_pdf, 0)
+
+        assert md == "# Header\n\nContent"
+        mock_to_md.assert_called_once()
+        args, kwargs = mock_to_md.call_args
+        assert args[0] is mock_pdf
+        assert kwargs.get("pages") == [0]
+
+
+class TestMergePagesProvenance:
+    def test_merge_pages_stamps_correct_page_numbers(self):
+        router = PdfPageRouter()
+        markdowns = [
+            "# Installation Guide\n\nConnect the power cable.",
+            "# Troubleshooting\n\nCheck the LED indicator.",
+        ]
+
+        doc = router._merge_pages(markdowns, "manual.pdf")
+
+        assert isinstance(doc, DoclingDocument)
+        # Check that items from page 1 have page_no == 1, and page 2 items have page_no == 2
+        page_1_items = [
+            item for item, _ in doc.iterate_items()
+            if hasattr(item, "prov") and item.prov and item.prov[0].page_no == 1
+        ]
+        page_2_items = [
+            item for item, _ in doc.iterate_items()
+            if hasattr(item, "prov") and item.prov and item.prov[0].page_no == 2
+        ]
+
+        assert len(page_1_items) > 0
+        assert len(page_2_items) > 0
+        # Verify text in respective pages
+        page_1_texts = " ".join(getattr(item, "text", "") for item in page_1_items)
+        page_2_texts = " ".join(getattr(item, "text", "") for item in page_2_items)
+        assert "Installation Guide" in page_1_texts
+        assert "Troubleshooting" in page_2_texts
+
+
