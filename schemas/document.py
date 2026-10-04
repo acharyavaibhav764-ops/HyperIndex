@@ -6,7 +6,7 @@ class DocumentIngestItem(BaseModel):
     product_id: str = Field(default="", description="Product identifier selected for this upload")
     version_id: str | None = Field(None, description="Metadata version identifier")
     version_message: str = Field(
-        default="You are uploading version 1", description="Human-readable version information"
+        default="You are uploading a new version", description="Human-readable version information"
     )
     filename: str = Field(..., description="Original filename")
     size_bytes: int = Field(..., description="File size in bytes")

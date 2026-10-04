@@ -87,6 +87,7 @@ class IngestionService:
                         Document.product_id == product_id,
                     )
                 )
+                
                 if existing_version is not None:
                     existing_document = self.db.get(Document, existing_version.document_id)
                     ingested_items.append(
