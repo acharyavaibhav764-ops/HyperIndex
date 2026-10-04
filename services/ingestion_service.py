@@ -1,13 +1,12 @@
 import inspect
 from typing import Any
-from uuid import uuid4
 
 from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core import Chunker, Embeddings, Parser, Retriever, Uploader
-from db.models import Document, DocumentVersion
+from db.models import Document
 from schemas.document import DocumentIngestItem, DocumentIngestResponse
 from utils.hasher import calculate_sha256
 
@@ -15,7 +14,7 @@ from utils.hasher import calculate_sha256
 class IngestionService:
     """
     Class to run the ingestion pipeline across object storage, SQL metadata,
-    and vector embeddings.
+    and vector embeddings with SHA-256 deduplication.
 
     Attributes:
         uploader
@@ -66,7 +65,7 @@ class IngestionService:
     def ingest_files(
         self, files: list[UploadFile], product_id: str = "default"
     ) -> DocumentIngestResponse:
-        """Handles uploading, parsing, chunking, embedding, versioning and duplicate detection."""
+        """Handles uploading, parsing, chunking, embedding, and deduplication."""
 
         if not files:
             raise ValueError("At least one file is required")
@@ -79,27 +78,18 @@ class IngestionService:
 
             # Check duplicate detection if database session is active
             if self.db is not None:
-                existing_version = self.db.scalar(
-                    select(DocumentVersion)
-                    .join(Document)
-                    .where(
-                        DocumentVersion.sha256 == file_hash,
+                existing_doc = self.db.scalar(
+                    select(Document).where(
+                        Document.sha256 == file_hash,
                         Document.product_id == product_id,
                     )
                 )
-                
-                if existing_version is not None:
-                    existing_document = self.db.get(Document, existing_version.document_id)
+                if existing_doc is not None:
                     ingested_items.append(
                         DocumentIngestItem(
-                            document_id=existing_version.document_id,
-                            product_id=existing_document.product_id if existing_document else product_id,
-                            version_id=existing_version.version_id,
-                            version_message=(
-                                f"Duplicate file: this is already version "
-                                f"{existing_version.version_number}"
-                            ),
-                            filename=getattr(file, "filename", None) or existing_version.filename,
+                            document_id=existing_doc.document_id,
+                            product_id=existing_doc.product_id,
+                            filename=getattr(file, "filename", None) or existing_doc.filename,
                             size_bytes=len(content),
                             collection=self.retriever.collection_name,
                             total_chunks=0,
@@ -135,25 +125,16 @@ class IngestionService:
                 embeddings=vectors,
             )
 
-            version_id = str(uuid4())
+            # Record in SQL database
             if self.db is not None:
                 document = Document(
                     document_id=doc_id,
                     product_id=product_id,
-                    title=filename,
-                    current_version_id=version_id,
-                )
-                version = DocumentVersion(
-                    version_id=version_id,
-                    document_id=doc_id,
-                    version_number=1,
                     filename=filename,
                     sha256=file_hash,
-                    object_key=doc_id,
-                    status="indexed",
+                    size_bytes=size_bytes,
                 )
                 self.db.add(document)
-                self.db.add(version)
                 self.db.commit()
 
             # Append to list of ingested items
@@ -161,8 +142,6 @@ class IngestionService:
                 DocumentIngestItem(
                     document_id=doc_id,
                     product_id=product_id,
-                    version_id=version_id,
-                    version_message="You are uploading version 1",
                     filename=filename,
                     size_bytes=size_bytes,
                     collection=self.retriever.collection_name,

@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from db.database import Base
-from db.models import DocumentVersion
+from db.models import Document
 from services.ingestion_service import IngestionService
 
 
@@ -120,7 +120,7 @@ class TestDuplicateUploads(unittest.TestCase):
         )
         self.assertEqual(len({item.document_id for item in response.documents}), 1)
         self.assertEqual(self.uploader.upload_calls, 1)
-        self.assertEqual(self.db.query(DocumentVersion).count(), 1)
+        self.assertEqual(self.db.query(Document).count(), 1)
 
     def test_same_file_can_be_uploaded_for_different_products(self) -> None:
         content = b"same exact bytes for two products"
@@ -138,7 +138,7 @@ class TestDuplicateUploads(unittest.TestCase):
             second_response.documents[0].document_id,
         )
         self.assertEqual(self.uploader.upload_calls, 2)
-        self.assertEqual(self.db.query(DocumentVersion).count(), 2)
+        self.assertEqual(self.db.query(Document).count(), 2)
 
 
 if __name__ == "__main__":
