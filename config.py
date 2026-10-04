@@ -6,6 +6,9 @@ from dataclasses import dataclass
 class Settings:
     """Central application configuration with environment variable fallbacks."""
 
+    # Database
+    database_url: str = os.getenv("DATABASE_URL", "sqlite:///./honeywell.db")
+
     # MinIO
     minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "minio:9000")
     minio_bucket: str = os.getenv("MINIO_BUCKET", "honeywell-documents")
