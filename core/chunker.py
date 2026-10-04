@@ -154,10 +154,12 @@ class Chunker:
                 "document_id": file_id,
                 "file_id": file_id,
                 "filename": filename,
-                "page": page,
-                "page_numbers": pages,
                 "chunk_index": len(metadatas),
             }
+            if page is not None:
+                meta["page"] = page
+            if pages:
+                meta["page_numbers"] = ",".join(map(str, pages))
 
             if is_picture_chunk:
                 meta["source"] = "image_description"
@@ -186,16 +188,17 @@ class Chunker:
                 except (AttributeError, IndexError, TypeError):
                     pass
 
-                metadatas.append(
-                    {
-                        "document_id": file_id,
-                        "file_id": file_id,
-                        "filename": filename,
-                        "page": page,
-                        "page_numbers": [page] if page is not None else [],
-                        "chunk_index": len(metadatas),
-                    }
-                )
+                meta = {
+                    "document_id": file_id,
+                    "file_id": file_id,
+                    "filename": filename,
+                    "chunk_index": len(metadatas),
+                }
+                if page is not None:
+                    meta["page"] = page
+                    meta["page_numbers"] = str(page)
+                
+                metadatas.append(meta)
 
                 chunks.append(heading_text)
 

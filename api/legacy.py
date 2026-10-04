@@ -1,5 +1,5 @@
 from fastapi import APIRouter, File, UploadFile
-from api.dependencies import chunker, embeddings, parser, retriever, uploader
+from api.deps import get_chunker, get_embeddings, get_parser, get_retriever, get_uploader
 from api.v1.endpoints.query import query_pipeline
 from schemas import (
     FileIndexResponse,
