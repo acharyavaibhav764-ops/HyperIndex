@@ -1,7 +1,19 @@
+# Virtual Environment
+venv/
+.venv/
+
+# Python Bytecode & Test Caches
 # ==============================================================================
 # Python & Bytecode
 # ==============================================================================
 __pycache__/
+*.pyc
+.pytest_cache/
+
+# Environment Variables
+.env
+
+# Local Databases & Storage
 *.py[cod]
 *$py.class
 *.so
@@ -28,6 +40,11 @@ venv.bak/
 # Data, Storage & Vector Databases (Local / Docker volumes)
 # ==============================================================================
 chroma_data/
+*.db
+
+# Editor Settings
+.vscode/
+
 minio_data/
 ollama_data/
 data/
