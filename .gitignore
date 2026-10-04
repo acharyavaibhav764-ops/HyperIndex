@@ -10,8 +10,9 @@ __pycache__/
 # Environment Variables
 .env
 
-# Local Vector Database Data
+# Local Databases & Storage
 chroma_data/
+*.db
 
 # Editor Settings
 .vscode/

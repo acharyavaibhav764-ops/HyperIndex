@@ -1,5 +1,6 @@
 from functools import lru_cache
 from fastapi import Depends, params
+from sqlalchemy.orm import Session
 
 from config import settings
 from core import (
@@ -10,6 +11,7 @@ from core import (
     Retriever,
     Uploader,
 )
+from db.session import get_db
 from services.ingestion_service import IngestionService
 from services.rag_service import RAGService
 
@@ -58,15 +60,19 @@ def get_ingestion_service(
     chunker: Chunker = Depends(get_chunker),
     embeddings: Embeddings = Depends(get_embeddings),
     retriever: Retriever = Depends(get_retriever),
+    db: Session | None = Depends(get_db),
 ) -> IngestionService:
-    
+    resolved_db = db if not isinstance(db, params.Depends) else None
+
     return IngestionService(
         uploader=uploader if not isinstance(uploader, params.Depends) else get_uploader(),
         parser=parser if not isinstance(parser, params.Depends) else get_parser(),
         chunker=chunker if not isinstance(chunker, params.Depends) else get_chunker(),
         embeddings=embeddings if not isinstance(embeddings, params.Depends) else get_embeddings(),
         retriever=retriever if not isinstance(retriever, params.Depends) else get_retriever(),
+        db=resolved_db,
     )
+
 
 def get_rag_service(
     retriever: Retriever = Depends(get_retriever),
@@ -77,4 +83,3 @@ def get_rag_service(
         generator=generator if not isinstance(generator, params.Depends) else get_generator(),
         retrieval_k=settings.retrieval_k,
     )
-
