@@ -7,9 +7,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core import Chunker, Embeddings, Parser, Retriever, Uploader
-from core.hasher import calculate_sha256
 from db.models import Document, DocumentVersion
 from schemas.document import DocumentIngestItem, DocumentIngestResponse
+from utils.hasher import calculate_sha256
 
 
 class IngestionService:
@@ -149,7 +149,6 @@ class IngestionService:
                     version_number=1,
                     filename=filename,
                     sha256=file_hash,
-                    normalized_hash=None,
                     object_key=doc_id,
                     status="indexed",
                 )

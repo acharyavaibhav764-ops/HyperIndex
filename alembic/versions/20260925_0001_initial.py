@@ -35,7 +35,6 @@ def upgrade() -> None:
         sa.Column("version_number", sa.Integer(), nullable=False),
         sa.Column("filename", sa.String(length=512), nullable=False),
         sa.Column("sha256", sa.String(length=64), nullable=False),
-        sa.Column("normalized_hash", sa.String(length=64), nullable=False),
         sa.Column("object_key", sa.String(length=1024), nullable=False),
         sa.Column("status", sa.String(length=64), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -44,13 +43,11 @@ def upgrade() -> None:
     )
     op.create_index("ix_document_versions_document_id", "document_versions", ["document_id"])
     op.create_index("ix_document_versions_sha256", "document_versions", ["sha256"])
-    op.create_index("ix_document_versions_normalized_hash", "document_versions", ["normalized_hash"])
     op.create_index("ix_document_versions_status", "document_versions", ["status"])
 
 
 def downgrade() -> None:
     op.drop_index("ix_document_versions_status", table_name="document_versions")
-    op.drop_index("ix_document_versions_normalized_hash", table_name="document_versions")
     op.drop_index("ix_document_versions_sha256", table_name="document_versions")
     op.drop_index("ix_document_versions_document_id", table_name="document_versions")
     op.drop_table("document_versions")

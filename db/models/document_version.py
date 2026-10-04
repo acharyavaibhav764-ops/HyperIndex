@@ -20,7 +20,6 @@ class DocumentVersion(Base):
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    normalized_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     object_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(
