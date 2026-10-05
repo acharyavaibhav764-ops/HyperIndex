@@ -1,4 +1,3 @@
-import asyncio
 from io import BytesIO
 import unittest
 from uuid import uuid4
@@ -7,9 +6,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from api.v1.endpoints import documents as documents_endpoint
 from db.database import Base
-from db.models import DocumentVersion
+from db.models import Document
+from services.ingestion_service import IngestionService
 
 
 class FakeFile:
@@ -18,10 +17,10 @@ class FakeFile:
         self.content_type = "text/plain"
         self.file = BytesIO(content)
 
-    async def read(self) -> bytes:
+    def read(self) -> bytes:
         return self.file.read()
 
-    async def seek(self, position: int) -> None:
+    def seek(self, position: int) -> None:
         self.file.seek(position)
 
 
@@ -59,12 +58,16 @@ class FakeChunker:
     def split(
         self, pages: list[dict[str, object]], document_id: str, filename: str
     ) -> tuple[list[str], list[dict[str, object]], list[str]]:
-        return ["chunk"], [{"filename": filename, "page": 1}], [f"{document_id}_0"]
+        return (
+            [pages[0]["text"]],
+            [{"source": filename, "page": 1, "document_id": document_id}],
+            [f"{document_id}_chunk_0"],
+        )
 
 
 class FakeEmbeddings:
-    def embed(self, chunks: list[str]) -> list[list[float]]:
-        return [[0.1] for _ in chunks]
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1, 0.2, 0.3]]
 
 
 class FakeRetriever:
@@ -76,50 +79,39 @@ class FakeRetriever:
 
 class TestDuplicateUploads(unittest.TestCase):
     def setUp(self) -> None:
-        original_services = (
-            documents_endpoint.uploader,
-            documents_endpoint.parser,
-            documents_endpoint.chunker,
-            documents_endpoint.embeddings,
-            documents_endpoint.retriever,
-        )
-        uploader = FakeUploader()
-        documents_endpoint.uploader = uploader
-        documents_endpoint.parser = FakeParser()
-        documents_endpoint.chunker = FakeChunker()
-        documents_endpoint.embeddings = FakeEmbeddings()
-        documents_endpoint.retriever = FakeRetriever()
-        self.original_services = original_services
-        self.uploader = uploader
+        self.uploader = FakeUploader()
+        self.parser = FakeParser()
+        self.chunker = FakeChunker()
+        self.embeddings = FakeEmbeddings()
+        self.retriever = FakeRetriever()
 
         self.engine = create_engine("sqlite://", poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
         self.db = session_factory()
 
+        self.service = IngestionService(
+            uploader=self.uploader,
+            parser=self.parser,
+            chunker=self.chunker,
+            embeddings=self.embeddings,
+            retriever=self.retriever,
+            db=self.db,
+        )
+
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
-        (
-            documents_endpoint.uploader,
-            documents_endpoint.parser,
-            documents_endpoint.chunker,
-            documents_endpoint.embeddings,
-            documents_endpoint.retriever,
-        ) = self.original_services
 
     def test_identical_files_in_one_request_are_only_stored_once(self) -> None:
         content = b"same exact document bytes"
-        response = asyncio.run(
-            documents_endpoint.ingest_documents(
-                [
-                    FakeFile("manual-a.txt", content),
-                    FakeFile("manual-b.txt", content),
-                    FakeFile("manual-c.txt", content),
-                ],
-                "product-test",
-                self.db,
-            )
+        response = self.service.ingest_files(
+            [
+                FakeFile("manual-a.txt", content),
+                FakeFile("manual-b.txt", content),
+                FakeFile("manual-c.txt", content),
+            ],
+            product_id="product-test",
         )
 
         self.assertEqual(
@@ -128,19 +120,15 @@ class TestDuplicateUploads(unittest.TestCase):
         )
         self.assertEqual(len({item.document_id for item in response.documents}), 1)
         self.assertEqual(self.uploader.upload_calls, 1)
-        self.assertEqual(self.db.query(DocumentVersion).count(), 1)
+        self.assertEqual(self.db.query(Document).count(), 1)
 
     def test_same_file_can_be_uploaded_for_different_products(self) -> None:
         content = b"same exact bytes for two products"
-        first_response = asyncio.run(
-            documents_endpoint.ingest_documents(
-                [FakeFile("manual.txt", content)], "product-a", self.db
-            )
+        first_response = self.service.ingest_files(
+            [FakeFile("manual.txt", content)], product_id="product-a"
         )
-        second_response = asyncio.run(
-            documents_endpoint.ingest_documents(
-                [FakeFile("manual.txt", content)], "product-b", self.db
-            )
+        second_response = self.service.ingest_files(
+            [FakeFile("manual.txt", content)], product_id="product-b"
         )
 
         self.assertEqual(first_response.documents[0].status, "indexed")
@@ -150,4 +138,8 @@ class TestDuplicateUploads(unittest.TestCase):
             second_response.documents[0].document_id,
         )
         self.assertEqual(self.uploader.upload_calls, 2)
-        self.assertEqual(self.db.query(DocumentVersion).count(), 2)
+        self.assertEqual(self.db.query(Document).count(), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
