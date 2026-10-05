@@ -1,6 +1,6 @@
 services:
   minio:
-    image: rancher/mirrored-minio-minio:RELEASE.2023-07-07T07-13-57Z
+    image: minio/minio:latest
     container_name: honeywell_minio
     command: server /data --console-address ":9001"
     environment:
