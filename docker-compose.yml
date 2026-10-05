@@ -1,7 +1,6 @@
 services:
   minio:
     image: minio/minio:latest
-    pull_policy: if_not_present
     container_name: honeywell_minio
     command: server /data --console-address ":9001"
     environment:
@@ -20,7 +19,6 @@ services:
 
   chroma:
     image: docker.io/chromadb/chroma:0.5.15
-    pull_policy: if_not_present
     container_name: honeywell_chroma
     environment:
       IS_PERSISTENT: "TRUE"
@@ -37,7 +35,6 @@ services:
 
   ollama:
     image: docker.io/ollama/ollama:latest
-    pull_policy: if_not_present
     container_name: honeywell_ollama
     environment:
       OLLAMA_KEEP_ALIVE: -1
@@ -66,7 +63,6 @@ services:
       ollama:
         condition: service_healthy
     environment:
-      DATABASE_URL: sqlite:///./honeywell.db
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
