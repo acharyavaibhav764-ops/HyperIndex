@@ -31,5 +31,9 @@ class Settings:
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     retrieval_k: int = int(os.getenv("RETRIEVAL_K", "5"))
 
+    # Prompt Settings
+    system_prompt: str | None = os.getenv("SYSTEM_PROMPT")
+    prompt_template: str | None = os.getenv("PROMPT_TEMPLATE")
+
 
 settings = Settings()
