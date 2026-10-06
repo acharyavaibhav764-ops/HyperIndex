@@ -106,9 +106,12 @@ class LibreOfficeConverter(BaseParser):
 
     def parse(self, file_bytes: bytes, filename: str, **kwargs) -> DoclingDocument:
         """Convert raw bytes to .docx and .pptx format then delegate parsing to DoclingParser"""
-
-        converted_bytes, target_filename = self._convert_to_openxml(file_bytes, filename)
+        converted_bytes, target_filename = self.convert_to_openxml(file_bytes, filename)
         return self._docling_parser.parse(converted_bytes, target_filename, **kwargs)
+
+    def convert_to_openxml(self, file_bytes: bytes, filename: str) -> tuple[bytes, str]:
+        """Convert raw bytes of .doc and .ppt files into .docx and .pptx"""
+        return self._convert_to_openxml(file_bytes, filename)
 
     def _convert_to_openxml(self, file_bytes: bytes, filename: str) -> tuple[bytes, str]:
         """Convert raw bytes of .doc and .ppt files into .docx and .pptx"""

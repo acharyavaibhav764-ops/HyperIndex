@@ -1,4 +1,3 @@
-from core import ParserRouter
 from functools import lru_cache
 from fastapi import Depends, params
 from sqlalchemy.orm import Session

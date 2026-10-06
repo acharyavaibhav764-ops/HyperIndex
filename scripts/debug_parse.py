@@ -2,16 +2,16 @@
 Quick CLI utility to test parsing and hybrid chunking on any supported document (.txt, .md, .docx, .pptx).
 
 Usage:
-    python tests/unit/test_parse.py path/to/document.txt
-    python tests/unit/test_parse.py path/to/document.md
-    python tests/unit/test_parse.py path/to/document.docx
-    python tests/unit/test_parse.py path/to/document.pptx
+    python scripts/debug_parse.py path/to/document.txt
+    python scripts/debug_parse.py path/to/document.md
+    python scripts/debug_parse.py path/to/document.docx
+    python scripts/debug_parse.py path/to/document.pptx
 """
 import sys
 from pathlib import Path
 
 # Ensure project root is in sys.path for direct script execution
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 

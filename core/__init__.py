@@ -1,51 +1,38 @@
-from .uploader import StorageError, Uploader
-
-from .parser import Parser
-from .parsers import (
-    BaseParser,
-    ParserRouter,
-    UnsupportedFileError,
-    TextParser,
-    DoclingParser,
-    LibreOfficeConverter,
-    LibreOfficeNotFoundError,
-    LibreOfficeConversionError,
-    PdfPageRouter,
-)
-
+"""Core package exports."""
 from .chunker import Chunker
 from .embeddings import Embeddings
 from .generator import GenerationError, Generator
-from .hasher import calculate_sha256, documents_are_identical
-from .parser import Parser
+from .parsers import (
+    BaseParser,
+    DoclingParser,
+    LibreOfficeConversionError,
+    LibreOfficeConverter,
+    LibreOfficeNotFoundError,
+    ParserRouter,
+    PdfPageRouter,
+    TextParser,
+    UnsupportedFileError,
+)
 from .retriever import Retriever
+from .uploader import StorageError, Uploader
 
 __all__ = [
-    "Uploader",
-    "StorageError",
-
-    "Parser",
     "BaseParser",
-    "ParserRouter",
-    "UnsupportedFileError",
-    "TextParser",
-    "DoclingParser",
-    "LibreOfficeConverter",
-    "LibreOfficeNotFoundError",
-    "LibreOfficeConversionError",
-    "PdfPageRouter",
-
     "Chunker",
+    "DoclingParser",
     "Embeddings",
-    "Retriever",
-    "Generator",
     "GenerationError",
     "Generator",
-    "calculate_sha256",
-    "documents_are_identical",
-    "Parser",
+    "LibreOfficeConversionError",
+    "LibreOfficeConverter",
+    "LibreOfficeNotFoundError",
+    "ParserRouter",
+    "PdfPageRouter",
     "Retriever",
     "StorageError",
+    "TextParser",
     "Uploader",
+    "UnsupportedFileError",
 ]
+
 

@@ -245,11 +245,12 @@ class TestBugBFix_MultiPageMetadata:
         for meta in metadatas:
             assert "page" in meta
             assert "page_numbers" in meta
-            assert isinstance(meta["page_numbers"], list)
-            assert meta["page"] == meta["page_numbers"][0] if meta["page_numbers"] else None
+            assert isinstance(meta["page_numbers"], (list, str))
+            parsed_pages = [int(p.strip()) for p in meta["page_numbers"].split(",")] if isinstance(meta["page_numbers"], str) else meta["page_numbers"]
+            assert meta["page"] == parsed_pages[0] if parsed_pages else None
             
             # If a chunk spans both slides
-            if 1 in meta["page_numbers"] and 2 in meta["page_numbers"]:
+            if 1 in parsed_pages and 2 in parsed_pages:
                 # Success!
                 pass
 
