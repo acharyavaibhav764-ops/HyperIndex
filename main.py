@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from api.deps import get_uploader
 from api.v1.router import api_router
 from core import GenerationError, StorageError
+from db.database import Base, engine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,6 +20,7 @@ async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycle."""
     
     logger.info("Initializing application resources...")
+    Base.metadata.create_all(bind=engine)
     get_uploader().ensure_bucket()
     yield
     logger.info("Shutting down application resources...")
@@ -43,6 +45,5 @@ async def generation_error_handler(request: Request, exc: GenerationError) -> JS
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-# Mount Modern Versioned API & Health Check
+# Mount Versioned Modern RESTful API & Health Probe
 app.include_router(api_router)
-
