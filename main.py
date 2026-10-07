@@ -43,5 +43,6 @@ async def generation_error_handler(request: Request, exc: GenerationError) -> JS
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-# Mount Versioned Modern RESTful API & Health Probe
+# Mount Modern Versioned API & Health Check
 app.include_router(api_router)
+
