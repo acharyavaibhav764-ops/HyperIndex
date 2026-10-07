@@ -4,6 +4,7 @@ from docling_core.types.doc import DoclingDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import settings
+from core.parsers.config import parser_settings
 
 
 class Chunker:
@@ -107,7 +108,7 @@ class Chunker:
         chunk_ids: list[str] = []
 
         # Initialize hybrid chunker and create list of raw chunks made in single pass
-        chunker = HybridChunker(tokenizer=settings.chunker_tokenizer)
+        chunker = HybridChunker(tokenizer=parser_settings.chunker_tokenizer)
         raw_chunks = list(chunker.chunk(doc))
 
         # Create a list of headings already covered by the chunker

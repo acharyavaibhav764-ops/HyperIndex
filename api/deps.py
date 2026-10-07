@@ -50,6 +50,8 @@ def get_generator() -> Generator:
         ollama_host=settings.ollama_host,
         ollama_port=settings.ollama_port,
         model=settings.ollama_model,
+        system_prompt=settings.system_prompt,
+        prompt_template=settings.prompt_template,
     )
 
 

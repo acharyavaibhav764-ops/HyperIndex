@@ -9,12 +9,14 @@ from .parsers import (
     LibreOfficeConverter,
     LibreOfficeNotFoundError,
     ParserRouter,
-    PdfPageRouter,
     TextParser,
     UnsupportedFileError,
 )
 from .retriever import Retriever
 from .uploader import StorageError, Uploader
+
+# Backward-compatibility alias
+Parser = ParserRouter
 
 __all__ = [
     "BaseParser",
@@ -26,8 +28,8 @@ __all__ = [
     "LibreOfficeConversionError",
     "LibreOfficeConverter",
     "LibreOfficeNotFoundError",
+    "Parser",
     "ParserRouter",
-    "PdfPageRouter",
     "Retriever",
     "StorageError",
     "TextParser",
