@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
 WORKDIR /code
@@ -15,7 +16,17 @@ RUN apt-get update \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /code/requirements.txt
-RUN pip install --no-cache-dir -r /code/requirements.txt
+
+# Option A: CPU-only PyTorch (~200MB download, fast & lightweight) [ACTIVE]
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+    && pip install --default-timeout=1000 --retries=10 torch torchvision --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --default-timeout=1000 --retries=10 -r /code/requirements.txt
+
+# Option B: GPU/CUDA PyTorch (~2.5GB+ download, requires NVIDIA GPU runtime) [COMMENTED]
+# RUN --mount=type=cache,target=/root/.cache/pip \
+#     pip install --upgrade pip \
+#     && pip install --default-timeout=1000 --retries=10 -r /code/requirements.txt
 
 COPY . /code
 
