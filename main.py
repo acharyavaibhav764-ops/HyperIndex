@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 import logging
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from api.deps import get_uploader
 from api.v1.router import api_router
@@ -27,6 +27,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Honeywell RAG", version="1.0.0", lifespan=lifespan)
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/swagger", include_in_schema=False)
+async def docs_redirect() -> RedirectResponse:
+    """Redirect root and /swagger requests directly to Swagger UI."""
+    return RedirectResponse(url="/docs")
 
 
 # Global Exception Handlers

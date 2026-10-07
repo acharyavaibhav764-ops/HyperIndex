@@ -7,7 +7,7 @@ from core import (
     Chunker,
     Embeddings,
     Generator,
-    Parser,
+    ParserRouter,
     Retriever,
     Uploader,
 )
@@ -23,8 +23,8 @@ def get_uploader() -> Uploader:
 
 
 @lru_cache
-def get_parser() -> Parser:
-    return Parser()
+def get_parser() -> ParserRouter:
+    return ParserRouter()
 
 
 @lru_cache
@@ -58,7 +58,7 @@ def get_generator() -> Generator:
 # Service Providers
 def get_ingestion_service(
     uploader: Uploader = Depends(get_uploader),
-    parser: Parser = Depends(get_parser),
+    parser: ParserRouter = Depends(get_parser),
     chunker: Chunker = Depends(get_chunker),
     embeddings: Embeddings = Depends(get_embeddings),
     retriever: Retriever = Depends(get_retriever),

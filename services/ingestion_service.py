@@ -5,7 +5,7 @@ from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from core import Chunker, Embeddings, Parser, Retriever, Uploader
+from core import Chunker, Embeddings, ParserRouter, Retriever, Uploader
 from db.models import Document
 from schemas.document import DocumentIngestItem, DocumentIngestResponse
 from utils.hasher import calculate_sha256
@@ -31,7 +31,7 @@ class IngestionService:
     def __init__(
         self,
         uploader: Uploader,
-        parser: Parser,
+        parser: ParserRouter,
         chunker: Chunker,
         embeddings: Embeddings,
         retriever: Retriever,
