@@ -1,13 +1,9 @@
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Integer, String, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.database import Base
-
-if TYPE_CHECKING:
-    from db.models.document_version import DocumentVersion
 
 
 class Document(Base):
@@ -20,7 +16,4 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    versions: Mapped[list["DocumentVersion"]] = relationship(
-        back_populates="document", cascade="all, delete-orphan"
     )
