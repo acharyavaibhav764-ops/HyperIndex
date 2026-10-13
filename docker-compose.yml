@@ -62,18 +62,18 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+    env_file:
+      - .env
     environment:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
-      MINIO_BUCKET: honeywell-files
+      MINIO_BUCKET: ${MINIO_BUCKET:-honeywell-files}
       CHROMA_HOST: chroma
       CHROMA_PORT: "8000"
-      CHROMA_COLLECTION: my_documents
+      CHROMA_COLLECTION: ${CHROMA_COLLECTION:-my_documents}
       OLLAMA_HOST: ollama
       OLLAMA_PORT: "11434"
-      OLLAMA_MODEL: llama3.2:3b
-      RETRIEVAL_K: "5"
       PYTHONUNBUFFERED: "1"
     ports:
       - "8000:8000"

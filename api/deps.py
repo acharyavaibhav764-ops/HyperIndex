@@ -35,7 +35,10 @@ def get_chunker() -> Chunker:
 
 @lru_cache
 def get_embeddings() -> Embeddings:
-    return Embeddings()
+    return Embeddings(
+        model_name=pipeline_settings.embedding_model,
+        device=pipeline_settings.embedding_device,
+    )
 
 
 @lru_cache
