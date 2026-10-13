@@ -12,3 +12,5 @@ python-pptx>=1.0.0
 docling>=2.0.0
 pymupdf>=1.24.0
 pymupdf4llm>=0.0.17
+sentence-transformers>=2.2.0
+python-dotenv>=1.0.0

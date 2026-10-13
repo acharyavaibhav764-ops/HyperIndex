@@ -1,5 +1,8 @@
 import os
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @dataclass(frozen=True)
@@ -41,8 +44,9 @@ class PipelineSettings:
     # EMBEDDER
 
     embedding_model: str = os.getenv(
-        "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+        "EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"
     )
+    embedding_device: str = os.getenv("EMBEDDING_DEVICE", "cpu")
 
 
     # RETRIEVER
