@@ -10,6 +10,7 @@ from core import (
     ParserRouter,
     Retriever,
     Uploader,
+    pipeline_settings,
 )
 from db.session import get_db
 from services.ingestion_service import IngestionService
@@ -29,7 +30,7 @@ def get_parser() -> ParserRouter:
 
 @lru_cache
 def get_chunker() -> Chunker:
-    return Chunker(chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap)
+    return Chunker(chunk_size=pipeline_settings.chunk_size, chunk_overlap=pipeline_settings.chunk_overlap)
 
 
 @lru_cache
@@ -49,9 +50,9 @@ def get_generator() -> Generator:
     return Generator(
         ollama_host=settings.ollama_host,
         ollama_port=settings.ollama_port,
-        model=settings.ollama_model,
-        system_prompt=settings.system_prompt,
-        prompt_template=settings.prompt_template,
+        model=pipeline_settings.ollama_model,
+        system_prompt=pipeline_settings.system_prompt,
+        prompt_template=pipeline_settings.prompt_template,
     )
 
 
@@ -83,5 +84,5 @@ def get_rag_service(
     return RAGService(
         retriever=retriever if not isinstance(retriever, params.Depends) else get_retriever(),
         generator=generator if not isinstance(generator, params.Depends) else get_generator(),
-        retrieval_k=settings.retrieval_k,
+        retrieval_k=pipeline_settings.retrieval_k,
     )

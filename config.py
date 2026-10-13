@@ -21,19 +21,9 @@ class Settings:
     chroma_path: str = os.getenv("CHROMA_PATH", "./chroma_data")
     chroma_collection: str = os.getenv("CHROMA_COLLECTION", "my_documents")
 
-    # Ollama
+    # Ollama Service Endpoint
     ollama_host: str = os.getenv("OLLAMA_HOST", "ollama")
     ollama_port: str = os.getenv("OLLAMA_PORT", "11434")
-    ollama_model: str = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
-
-    # RAG & Ingestion Parameters
-    chunk_size: int = int(os.getenv("CHUNK_SIZE", "1000"))
-    chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "200"))
-    retrieval_k: int = int(os.getenv("RETRIEVAL_K", "5"))
-
-    # Prompt Settings
-    system_prompt: str | None = os.getenv("SYSTEM_PROMPT")
-    prompt_template: str | None = os.getenv("PROMPT_TEMPLATE")
 
 
 settings = Settings()

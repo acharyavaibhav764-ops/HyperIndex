@@ -8,11 +8,12 @@ from typing import Final
 from docling_core.types.doc import DoclingDocument
 
 from .base import BaseParser
-from .config import parser_settings
+from ..pipeline_config import pipeline_settings
 from .docling_parser import DoclingParser
 
-# Backward compatibility alias
-settings = parser_settings
+# Backward compatibility aliases
+parser_settings = pipeline_settings
+settings = pipeline_settings
 
 logger = logging.getLogger(__name__)
 
