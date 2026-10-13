@@ -10,11 +10,11 @@ from docling_core.types.doc import DocItemLabel, DoclingDocument, SectionHeaderI
 from docling_core.types.io import DocumentStream
 
 from .base import BaseParser
-from . import config
-from .config import parser_settings
+from core import pipeline_config
 
 # Backward compatibility alias
-settings = parser_settings
+settings = pipeline_config.pipeline_settings
+parser_settings = pipeline_config.pipeline_settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +30,19 @@ def _build_vlm_converter() -> DocumentConverter:
     # Configure a VLM engine class using existing presets
     try:
         picture_opts = PictureDescriptionVlmEngineOptions.from_preset(
-            config.parser_settings.picture_description_preset
+            pipeline_config.pipeline_settings.picture_description_preset
         )
     except Exception:
         logger.warning(
             "Preset %r not found; falling back to 'smolvlm'.",
-            config.parser_settings.picture_description_preset,
+            pipeline_config.pipeline_settings.picture_description_preset,
         )
         picture_opts = PictureDescriptionVlmEngineOptions.from_preset("smolvlm")
 
     # Update system prompt for the VLM engine
-    if config.parser_settings.picture_description_prompt:
+    if pipeline_config.pipeline_settings.picture_description_prompt:
         picture_opts = picture_opts.model_copy(
-            update={"prompt": config.parser_settings.picture_description_prompt}
+            update={"prompt": pipeline_config.pipeline_settings.picture_description_prompt}
         )
 
     # Store the VLM engine configuration in pipeline_options
@@ -180,7 +180,7 @@ class DoclingParser(BaseParser):
         stream = DocumentStream(name=filename, stream=io.BytesIO(file_bytes))
 
         # Convert with VLM only if picture description enabled
-        if config.parser_settings.enable_picture_description:
+        if pipeline_config.pipeline_settings.enable_picture_description:
             doc = self._convert_with_vlm(stream, filename)
         else:
             if self._converter is None:

@@ -4,6 +4,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from config import settings
+from .pipeline_config import pipeline_settings
 
 
 class GenerationError(Exception):
@@ -88,9 +89,9 @@ class Generator:
         host = ollama_host or settings.ollama_host
         port = ollama_port or settings.ollama_port
         self.ollama_url = f"http://{host}:{port}/api/generate"
-        self.model = model or settings.ollama_model
-        self.system_prompt = system_prompt or settings.system_prompt or DEFAULT_SYSTEM_PROMPT
-        self.prompt_template = prompt_template or settings.prompt_template or DEFAULT_PROMPT_TEMPLATE
+        self.model = model or pipeline_settings.ollama_model
+        self.system_prompt = system_prompt or pipeline_settings.system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.prompt_template = prompt_template or pipeline_settings.prompt_template or DEFAULT_PROMPT_TEMPLATE
 
     def build_prompt(
         self,

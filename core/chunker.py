@@ -3,8 +3,10 @@ from docling.chunking import HybridChunker
 from docling_core.types.doc import DoclingDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from config import settings
-from core.parsers.config import parser_settings
+from core import pipeline_config
+
+# Module alias
+pipeline_settings = pipeline_config.pipeline_settings
 
 
 class Chunker:
@@ -31,8 +33,8 @@ class Chunker:
     ) -> None:
         """Configure chunker class"""
 
-        self.chunk_size = chunk_size or settings.chunk_size
-        self.chunk_overlap = chunk_overlap or settings.chunk_overlap
+        self.chunk_size = chunk_size or pipeline_config.pipeline_settings.chunk_size
+        self.chunk_overlap = chunk_overlap or pipeline_config.pipeline_settings.chunk_overlap
         self.separators = separators or ["\n\n", "\n", ". ", " ", ""]
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
@@ -108,7 +110,7 @@ class Chunker:
         chunk_ids: list[str] = []
 
         # Initialize hybrid chunker and create list of raw chunks made in single pass
-        chunker = HybridChunker(tokenizer=parser_settings.chunker_tokenizer)
+        chunker = HybridChunker(tokenizer=pipeline_config.pipeline_settings.chunker_tokenizer)
         raw_chunks = list(chunker.chunk(doc))
 
         # Create a list of headings already covered by the chunker
