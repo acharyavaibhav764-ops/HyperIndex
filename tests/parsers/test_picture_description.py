@@ -86,9 +86,9 @@ class TestPictureDescriptionDisabled:
 
     def test_docx_no_figure_description_chunks_by_default(self, monkeypatch):
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "false")
-        import importlib, core.parsers.config as cfg
+        import importlib, core.pipeline_config as cfg
         importlib.reload(cfg)
-        from core.parsers.config import parser_settings as s
+        from core.pipeline_config import pipeline_settings as s
         assert not s.enable_picture_description
 
         parser = DoclingParser()
@@ -102,9 +102,9 @@ class TestPictureDescriptionDisabled:
 
     def test_pptx_no_figure_description_chunks_by_default(self, monkeypatch):
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "false")
-        import importlib, core.parsers.config as cfg
+        import importlib, core.pipeline_config as cfg
         importlib.reload(cfg)
-        from core.parsers.config import parser_settings as s
+        from core.pipeline_config import pipeline_settings as s
         assert not s.enable_picture_description
 
         parser = DoclingParser()
@@ -119,7 +119,7 @@ class TestPictureDescriptionDisabled:
     def test_all_existing_docx_chunks_still_present(self, monkeypatch):
         """Text content must not regress when picture description is disabled."""
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "false")
-        import importlib, core.parsers.config as cfg
+        import importlib, core.pipeline_config as cfg
         importlib.reload(cfg)
 
         parser = DoclingParser()
@@ -231,9 +231,9 @@ class TestPictureDescriptionEnabled:
 
     def test_docx_figure_description_chunk_present(self, monkeypatch):
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "true")
-        import importlib, core.parsers.config as cfg
+        import importlib, core.pipeline_config as cfg
         importlib.reload(cfg)
-        from core.parsers.config import parser_settings as s
+        from core.pipeline_config import pipeline_settings as s
         assert s.enable_picture_description
 
         parser = DoclingParser()
@@ -245,7 +245,7 @@ class TestPictureDescriptionEnabled:
 
     def test_pptx_figure_description_chunk_present(self, monkeypatch):
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "true")
-        import importlib, core.parsers.config as cfg
+        import importlib, core.pipeline_config as cfg
         importlib.reload(cfg)
 
         parser = DoclingParser()
@@ -257,7 +257,7 @@ class TestPictureDescriptionEnabled:
 
     def test_figure_description_metadata_present(self, monkeypatch):
         monkeypatch.setenv("ENABLE_PICTURE_DESCRIPTION", "true")
-        import importlib, core.parsers.config as cfg
+        import importlib, core.pipeline_config as cfg
         importlib.reload(cfg)
 
         parser = DoclingParser()

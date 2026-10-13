@@ -4,6 +4,7 @@ import chromadb
 
 from config import settings
 from .embeddings import Embeddings
+from .pipeline_config import pipeline_settings
 
 
 class Retriever:
@@ -67,11 +68,12 @@ class Retriever:
             embeddings=embeddings,
         )
 
-    def retrieve(self, query: str, k: int = 5) -> dict[str, Any]:
+    def retrieve(self, query: str, k: int | None = None) -> dict[str, Any]:
         """Query ChromaDB for the top-k most semantically similar chunks."""
 
+        target_k = k if k is not None else pipeline_settings.retrieval_k
         return self.collection.query(
             query_texts=[query],
-            n_results=k,
+            n_results=target_k,
             include=["documents", "metadatas", "distances"],
         )

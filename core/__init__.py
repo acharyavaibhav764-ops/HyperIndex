@@ -12,6 +12,7 @@ from .parsers import (
     TextParser,
     UnsupportedFileError,
 )
+from .pipeline_config import PipelineSettings, pipeline_settings
 from .retriever import Retriever
 from .uploader import StorageError, Uploader
 
@@ -30,6 +31,8 @@ __all__ = [
     "LibreOfficeNotFoundError",
     "Parser",
     "ParserRouter",
+    "PipelineSettings",
+    "pipeline_settings",
     "Retriever",
     "StorageError",
     "TextParser",
