@@ -134,6 +134,7 @@ from .docling_parser import (
 )
 from . import pdf_cleanup, pdf_structure  # v5.7
 from . import pdf_cellmarks  # v5.9 WP3
+from . import pdf_glyphs  # v5.9.2
 from . import pdf_coverage   # v5.9 WP4
 from . import pdf_figures    # v5.9 WP5
 
@@ -906,6 +907,13 @@ class PdfPageRouter(BaseParser):
         """
         combined = DoclingDocument(name=filename.rsplit(".", 1)[0])
         converter = DocumentConverter(allowed_formats=[InputFormat.MD])
+
+        # v5.9.2: every route (text / Docling / SmolVLM) ends up here. Map Wingdings/Symbol
+        # private-use glyphs (ticks, arrows, circled call-out numbers) to real text, and drop them
+        # from the raw page text so coverage does not report them as missing words.
+        page_markdowns = [pdf_glyphs.normalize_glyphs(md) for md in page_markdowns]
+        if page_raw_texts:
+            page_raw_texts = [pdf_glyphs.strip_glyphs(t) for t in page_raw_texts]
 
         # v5.7: strip running footers, then clean each page's markdown (markup, glued
         # words, picture-text debris, table normalisation) before Docling parses it.

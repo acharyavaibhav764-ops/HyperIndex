@@ -20,11 +20,24 @@ _INNER_SPACES = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)")
 _SEP_ROW_RE = re.compile(r"^\|(\s*:?-{2,}:?\s*\|)+\s*$")   # v5.9 WP1
 _DOT_RUN_RE = re.compile(r"\.{4,}")                          # v5.9 WP1
 _JUNK_CHUNK_RE = re.compile(r"^[\s|:\-.]*$")                  # v5.9 WP1
+# v5.9.4: a table separator row that the line chunker cut in half loses its leading "|"
+# ("-------|--------|-------|"), so it no longer counts as a table line.
+_SEP_FRAG_RE = re.compile(r"^[\s|:\-]*-[\s|:\-]*$")
 
 # v5.9.1 WP2: ToC detection
 _TOC_HEAD_RE = re.compile(r"^(?:table of )?contents?\W*$|^inhalt(?:sverzeichnis)?\W*$", re.I)
 _TOC_ROW_RE = re.compile(
     r"\.{3,}\s*\|?\s*\d+\s*\|?\s*$|^\|\s*\d+(?:\.\d+)*\.?\s*\|.*\|\s*\d+\s*\|\s*$"
+)
+
+# v5.9.2: reflowed ToC. PyMuPDF4LLM joins the lines of a ToC page and the dot leaders are gone by
+# the time detection runs, so the dot-leader test above never fires on continuation pages
+# ("... tunnel socket) 9 2.4 Inserting the connection board ... 10 2.5 Installation ... 12").
+# Count "section-number title page-number" entries instead.
+_TOC_ENTRY_RE = re.compile(
+    r"(?<![\w.])\d+(?:\.\d+){0,3}\.?\s+[A-Za-z(][^\n|]{2,90}?\s+\d{1,3}"
+    r"(?=\s+\d+(?:\.\d+){0,3}\.?\s+[A-Za-z(]|\s*$)",
+    re.M,
 )
 
 # v5.9.1 WP6: metadata regexes (fixed: negative-lookbehind prevents over-matching)
@@ -57,6 +70,17 @@ def _collapse_sep_rows(text: str) -> str:
             line = "|" + "---|" * cols
         out.append(line)
     return "\n".join(out)
+
+
+def _is_sep_fragment_chunk(ls: list[str]) -> bool:
+    """v5.9.4: breadcrumb heading(s) + a lone separator fragment, nothing else."""
+    sep = [x for x in ls if x.strip() and _SEP_FRAG_RE.match(x.strip())]
+    rest = [x for x in ls if x.strip() and not _SEP_FRAG_RE.match(x.strip())]
+    def breadcrumb(x: str) -> bool:      # a heading, not a sentence of body text
+        x = x.strip()
+        return not x.startswith("|") and len(x) <= 100 and len(x.split()) <= 14 and not x.endswith(".")
+
+    return bool(sep) and len(rest) <= 3 and all(breadcrumb(x) for x in rest)
 
 
 def _strip_dot_runs(text: str) -> str:
@@ -116,12 +140,26 @@ def _last_heading(meta: dict[str, Any]) -> str:
     return str(hp or "").split(" > ")[-1].strip()
 
 
-def _is_toc_chunk(text: str, meta: dict[str, Any]) -> bool:
+def _toc_entry_stats(text: str) -> tuple[int, float]:
+    """(number of 'N.N Title page' entries, share of the text they cover)."""
+    ms = list(_TOC_ENTRY_RE.finditer(text))
+    return len(ms), sum(len(m.group()) for m in ms) / max(1, len(text))
+
+
+def _is_toc_chunk(text: str, meta: dict[str, Any], prev_is_toc: bool = False) -> bool:
     if _TOC_HEAD_RE.match(_last_heading(meta)):
         return True
     lines = [x.strip() for x in text.split("\n") if x.strip() and not _SEP_ROW_RE.match(x.strip())]
     hits = sum(1 for x in lines if _TOC_ROW_RE.search(x))
-    return hits >= 2 and hits / len(lines) >= 0.5
+    if hits >= 2 and hits / len(lines) >= 0.5:
+        return True
+    # v5.9.2: reflowed ToC rows without dot leaders; a ToC that continues on the next page has
+    # no 'Contents' heading, so a chunk right after a ToC chunk needs far less evidence.
+    n, cov = _toc_entry_stats(text)
+    if (n >= 4 and cov >= 0.55) or (prev_is_toc and n >= 2 and cov >= 0.4):
+        return True
+    low = text.lower()
+    return prev_is_toc and n == 0 and "table of contents" in low and len(text) < 400
 
 
 def _toc_lines(text: str) -> list[str]:
@@ -132,7 +170,8 @@ def _toc_lines(text: str) -> list[str]:
             continue
         s = " ".join(c.strip() for c in s.strip("|").split("|") if c.strip())
         s = re.sub(r"\s{2,}", " ", re.sub(r"\.{2,}", " ", s)).strip()
-        if s:
+        # v5.9.2: keep real entries only - running headers have no page number, legal prose is long
+        if s and (_TOC_ENTRY_RE.search(s) or (len(s) <= 80 and re.search(r"\d", s))):
             out.append(s)
     return out
 
@@ -216,7 +255,7 @@ def postprocess_chunks(
         non_tl = [x for x in ls if x.strip() and not x.strip().startswith("|")]
 
         # Drop separator-only junk, also when a breadcrumb sits in front of it (v5.9.1)
-        if _JUNK_CHUNK_RE.match(text) or (
+        if _JUNK_CHUNK_RE.match(text) or _is_sep_fragment_chunk(ls) or (
             tl and len(non_tl) <= 3 and all(_JUNK_CHUNK_RE.match(x.strip()) for x in tl)
         ):
             continue
@@ -260,8 +299,11 @@ def postprocess_chunks(
 
     # v5.9.1 WP2: tag + merge ToC chunks
     tagged: list[dict[str, Any]] = []
+    prev_toc = False
     for c, m in zip(out_chunks, out_metas):
-        if m.get("content_type") != "toc" and _is_toc_chunk(c, m):
+        is_toc = m.get("content_type") == "toc" or _is_toc_chunk(c, m, prev_toc)
+        if is_toc and m.get("content_type") != "toc":
             m = {**m, "content_type": "toc"}
+        prev_toc = is_toc
         tagged.append(m)
     return _merge_toc(out_chunks, tagged)

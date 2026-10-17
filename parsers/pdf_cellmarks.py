@@ -1,7 +1,8 @@
 """v5.9 WP3: Availability-mark injection for PDF table cells.
 
 Detects tick-mark images in table cells → converts to Yes/No text.
-Called from pdf_router._docling_page() and _smolvlm_page() before export_to_markdown().
+v5.9.2: image ticks are located by image centre (not strict containment) and written so they
+survive Docling's computed grid. Called from pdf_router._docling_page() and _smolvlm_page() before export_to_markdown().
 """
 from __future__ import annotations
 
@@ -122,6 +123,115 @@ def inject_marks(
             logger.warning("cellmarks: table processing failed: %s", exc)
 
 
+_SNAP_TOL = 3.0        # v5.9.2: centre-in-cell tolerance (pt); TableFormer boxes are not pixel exact
+_SNAP_PITCH = 0.75     # v5.9.2: max distance to a row/col centre, as a fraction of the row/col pitch
+
+
+def _is_tick_colour(page, x0, y0, x1, y1) -> bool:
+    """v5.9.2: stricter than _is_greenish - judged on the non-white pixels only."""
+    try:
+        import fitz
+        pm = page.get_pixmap(clip=fitz.Rect(x0, y0, x1, y1), colorspace=fitz.csRGB, alpha=False)
+        s = pm.samples
+        ink = green = 0
+        for i in range(0, len(s) - 2, 3):
+            r, g, b = s[i], s[i + 1], s[i + 2]
+            if min(r, g, b) >= 215:
+                continue
+            ink += 1
+            if g > r + 15 and g > b + 15:
+                green += 1
+        return ink > 0 and green / ink >= 0.6
+    except Exception:
+        return False
+
+
+def _median(vals):
+    v = sorted(vals)
+    return v[len(v) // 2] if v else None
+
+
+def _axes(cells):
+    """Median centre per column / row index from the single-span cells that carry indices."""
+    cols: dict[int, list[float]] = {}
+    rows: dict[int, list[float]] = {}
+    for cell, (l, t, r, b) in cells:
+        ri = getattr(cell, "start_row_offset_idx", None)
+        ci = getattr(cell, "start_col_offset_idx", None)
+        if ri is None or ci is None:
+            continue
+        if getattr(cell, "end_col_offset_idx", ci + 1) - ci == 1:
+            cols.setdefault(ci, []).append((l + r) / 2)
+        if getattr(cell, "end_row_offset_idx", ri + 1) - ri == 1:
+            rows.setdefault(ri, []).append((t + b) / 2)
+    return ({k: _median(v) for k, v in cols.items()}, {k: _median(v) for k, v in rows.items()})
+
+
+def _nearest(axis: dict[int, float], v: float):
+    if not axis:
+        return None
+    k = min(axis, key=lambda i: abs(axis[i] - v))
+    pts = sorted(axis.values())
+    pitch = _median([b - a for a, b in zip(pts, pts[1:])]) if len(pts) > 1 else None
+    if pitch and abs(axis[k] - v) > _SNAP_PITCH * pitch:
+        return None
+    return k
+
+
+def _write_position(table_item, r: int, c: int, text: str) -> bool:
+    """v5.9.2: write `text` into grid position (r, c) in a way that survives export.
+
+    docling-core builds `grid` fresh on every access and fills cells that have no content with
+    new blank placeholders, so `grid[r][c].text = ...` on an empty cell is silently lost. Write
+    into `table_cells` instead (adding a cell when none covers the position)."""
+    data = table_item.data
+    tcs = getattr(data, "table_cells", None)
+    if tcs is None:
+        try:
+            data.grid[r][c].text = text
+            return True
+        except Exception:
+            return False
+    for tc in tcs:
+        if (tc.start_row_offset_idx <= r < tc.end_row_offset_idx
+                and tc.start_col_offset_idx <= c < tc.end_col_offset_idx):
+            tc.text = text
+            return True
+    if not tcs:
+        return False
+    upd = dict(text=text, row_span=1, col_span=1, start_row_offset_idx=r, end_row_offset_idx=r + 1,
+               start_col_offset_idx=c, end_col_offset_idx=c + 1, column_header=False,
+               row_header=False, bbox=None)
+    proto = tcs[0]
+    if hasattr(proto, "model_copy"):
+        new = proto.model_copy(update=upd)
+    else:
+        import copy
+        new = copy.copy(proto)
+        for k, v in upd.items():
+            setattr(new, k, v)
+    tcs.append(new)
+    return True
+
+
+def _mark_text(old: str) -> str:
+    old = (old or "").strip()
+    # v5.9.3: a footnote marker such as "*" carries no text; chunk cleanup strips it to "Yes ()"
+    return "Yes" if (not old or old in ("...", "\u2026") or not re.search(r"\w", old)) else f"Yes ({old})"
+
+
+def _is_legend_swatch(page, bbox) -> bool:
+    """v5.9.3: the tick in the table legend ("[tick] = available") is a key, not a table value.
+    On the SEM manual it sits inside the last body row's box and was written into that row."""
+    try:
+        import fitz
+        x0, y0, x1, y1 = bbox
+        words = page.get_text("words", clip=fitz.Rect(x1, y0 - 2, x1 + 40, y1 + 2))
+        words.sort(key=lambda w: w[0])
+        return bool(words) and words[0][4].startswith("=")
+    except Exception:
+        return False
+
 def _process_table(table_item, all_images, page_fitz, page_height, legend, repeat_min):
     grid = table_item.data.grid
     if not grid:
@@ -143,6 +253,17 @@ def _process_table(table_item, all_images, page_fitz, page_height, legend, repea
     if not cells:
         return
 
+    # v5.9.2: v5.9.1 required a tick image to lie FULLY inside one cell box (2 pt tolerance).
+    # That passed the offline test (exact PyMuPDF ruling-line rectangles) but not on real Docling
+    # output, whose TableFormer boxes are approximate and whose empty cells are blank placeholders.
+    # Now: the image CENTRE must fall in a cell box (+3 pt) or snap to the nearest row/column.
+    tl_ = min(bb[0] for _, bb in cells) - _SNAP_TOL
+    tt_ = min(bb[1] for _, bb in cells) - _SNAP_TOL
+    tr_ = max(bb[2] for _, bb in cells) + _SNAP_TOL
+    tb_ = max(bb[3] for _, bb in cells) + _SNAP_TOL
+    col_x, row_y = _axes(cells)
+
+    n_small = 0
     candidates = []
     for img in all_images:
         ib = img.get("bbox") or img.get("rect")
@@ -155,68 +276,89 @@ def _process_table(table_item, all_images, page_fitz, page_height, legend, repea
         asp = w / h
         if not (_ASPECT_MIN <= asp <= _ASPECT_MAX):
             continue
-        in_cell = any(_inside(ix0, iy0, ix1, iy1, *pm) for _, pm in cells)
-        if not in_cell:
+        cx, cy = (ix0 + ix1) / 2, (iy0 + iy1) / 2
+        if not (tl_ <= cx <= tr_ and tt_ <= cy <= tb_):
             continue
+        if _is_legend_swatch(page_fitz, (ix0, iy0, ix1, iy1)):
+            continue
+        n_small += 1
         xref = img.get("xref", 0)
-        candidates.append({"bbox": (ix0, iy0, ix1, iy1), "xref": xref,
-                           "hash": _cand_hash(img, page_fitz, xref)})
+        candidates.append({"bbox": (ix0, iy0, ix1, iy1), "c": (cx, cy), "xref": xref,
+                            "hash": _cand_hash(img, page_fitz, xref)})
 
-    if not candidates:
-        for cell, _ in cells:
-            _apply_dots(cell, legend)
-        return
+    def locate(c):
+        """-> (cell | None, (row, col) | None) for a candidate image."""
+        cx, cy = c["c"]
+        hit = [(cell, bb) for cell, bb in cells
+               if bb[0] - _SNAP_TOL <= cx <= bb[2] + _SNAP_TOL and bb[1] - _SNAP_TOL <= cy <= bb[3] + _SNAP_TOL]
+        if hit:
+            cell = min(hit, key=lambda x: (x[1][2] - x[1][0]) * (x[1][3] - x[1][1]))[0]
+            return cell, (getattr(cell, "start_row_offset_idx", None), getattr(cell, "start_col_offset_idx", None))
+        ci, ri = _nearest(col_x, cx), _nearest(row_y, cy)
+        return (None, (ri, ci)) if ri is not None and ci is not None else (None, None)
 
     hash_count: dict[str, int] = {}
     for cand in candidates:
-        h = cand["hash"]
-        if h:
-            hash_count[h] = hash_count.get(h, 0) + 1
-
-    mark_hashes = {h for h, c in hash_count.items() if c >= repeat_min}
+        if cand["hash"]:
+            hash_count[cand["hash"]] = hash_count.get(cand["hash"], 0) + 1
+    mark_hashes = {h for h, n in hash_count.items() if n >= repeat_min}
 
     col_img_count: dict[int, int] = {}
     col_total: dict[int, int] = {}
     for row_i, row in enumerate(grid):
         for col_i, cell in enumerate(row):
-            if row_i == 0:
-                continue
-            col_total[col_i] = col_total.get(col_i, 0) + 1
+            if row_i:
+                col_total[col_i] = col_total.get(col_i, 0) + 1
 
+    marked_cells: set[int] = set()
+    marked_pos: set[tuple] = set()
     n_marked = 0
-    for cell, (cx0, cy0, cx1, cy1) in cells:
-        col_i = getattr(cell, "start_col_offset_idx", -1)
-        mark_found = False
-
-        for cand in candidates:
-            ix0, iy0, ix1, iy1 = cand["bbox"]
-            if not _inside(ix0, iy0, ix1, iy1, cx0, cy0, cx1, cy1):
-                continue
-            h = cand["hash"]
-            if not h or h not in mark_hashes:
-                col_img_count[col_i] = col_img_count.get(col_i, 0) + 1
-                continue
-            if not _is_greenish(page_fitz, ix0, iy0, ix1, iy1):
-                continue
-            mark_found = True
-            break
-
-        if mark_found:
+    for cand in candidates:
+        cell, pos = locate(cand)
+        ix0, iy0, ix1, iy1 = cand["bbox"]
+        if mark_hashes:                      # repeated image: the classic tick
+            is_mark = cand["hash"] in mark_hashes and _is_greenish(page_fitz, ix0, iy0, ix1, iy1)
+        else:                                # digests missing / all different: judge by colour
+            is_mark = _is_tick_colour(page_fitz, ix0, iy0, ix1, iy1)
+        if not is_mark:
+            if cell is not None:
+                ci = getattr(cell, "start_col_offset_idx", -1)
+                col_img_count[ci] = col_img_count.get(ci, 0) + 1
+            continue
+        if cell is not None and id(cell) in marked_cells:
+            continue
+        if cell is None and (pos is None or pos in marked_pos):
+            continue
+        if cell is not None:
+            cell.text = _mark_text(cell.text)
+            marked_cells.add(id(cell))
             n_marked += 1
-            old = (cell.text or "").strip()
-            if not old or old in ("...", "..."):
-                cell.text = "Yes"
-            else:
-                cell.text = f"Yes ({old})"
         else:
-            _apply_dots(cell, legend)
-            if not (cell.text or "").strip():
-                ocr = _ocr_cell(page_fitz, cx0, cy0, cx1, cy1)
-                if ocr:
-                    cell.text = ocr
+            r, c_ = pos
+            try:
+                old = grid[r][c_].text
+            except Exception:
+                old = ""
+            if _write_position(table_item, r, c_, _mark_text(old)):
+                marked_pos.add(pos)
+                n_marked += 1
 
-    logger.info("cellmarks: %d cells, %d candidate imgs, %d mark hashes, %d cells marked",
-                len(cells), len(candidates), len(mark_hashes), n_marked)
+    for cell, (cx0, cy0, cx1, cy1) in cells:
+        if id(cell) in marked_cells:
+            continue
+        pos = (getattr(cell, "start_row_offset_idx", None), getattr(cell, "start_col_offset_idx", None))
+        if pos in marked_pos:
+            continue
+        _apply_dots(cell, legend)
+        if not (cell.text or "").strip():
+            ocr = _ocr_cell(page_fitz, cx0, cy0, cx1, cy1)
+            if ocr:
+                cell.text = ocr
+
+    # v5.9.2: always visible in the console when small images were seen but none became a mark.
+    (logger.warning if (n_small and not n_marked) else logger.info)(
+        "cellmarks: %d cells, %d small imgs in table, %d repeated-hash groups, %d cells marked",
+        len(cells), n_small, len(mark_hashes), n_marked)
     header_row = grid[0] if grid else []
     for col_i, img_c in col_img_count.items():
         total = col_total.get(col_i, 1)

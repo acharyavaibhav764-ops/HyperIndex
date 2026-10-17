@@ -1,0 +1,1109 @@
+diff -ruN a/core/chunk_cleanup.py b/core/chunk_cleanup.py
+--- a/core/chunk_cleanup.py	2026-10-16 04:35:42.127077750 +0000
++++ b/core/chunk_cleanup.py	2026-10-16 04:36:21.582437680 +0000
+@@ -1,267 +1,295 @@
+-"""v5.9 chunk-level sanitiser (extends v5.8). Pure Python — no Docling imports.
+-
+-v5.8: strip_markup, postprocess_chunks (echo/micro drop).
+-v5.9 WP1: _collapse_sep_rows, _strip_dot_runs, heading-merge, junk-drop.
+-v5.9.1:
+-  WP1: junk test ignores the breadcrumb lines in front of a table; a header-only table
+-       fragment is carried into the header-less table chunks that follow it.
+-  WP2: ToC chunks are tagged content_type='toc' and merged into a single compact chunk.
+-  WP6: section_id() returns 'p28:1.2'; extract_doc_meta() extracts doc_number/version/date
+-       with fixed regexes (negative-lookbehind prevents over-matching GB0_V2).
+-"""
+-from __future__ import annotations
+-
+-import re
+-from typing import Any
+-
+-_ATX = re.compile(r"(?m)(?:^|(?<=[ \t]))(?:#{2,6}|#(?=[ \t]*\*\*))[ \t]*")
+-_ITALIC = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
+-_INNER_SPACES = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)")
+-_SEP_ROW_RE = re.compile(r"^\|(\s*:?-{2,}:?\s*\|)+\s*$")   # v5.9 WP1
+-_DOT_RUN_RE = re.compile(r"\.{4,}")                          # v5.9 WP1
+-_JUNK_CHUNK_RE = re.compile(r"^[\s|:\-.]*$")                  # v5.9 WP1
+-
+-# v5.9.1 WP2: ToC detection
+-_TOC_HEAD_RE = re.compile(r"^(?:table of )?contents?\W*$|^inhalt(?:sverzeichnis)?\W*$", re.I)
+-_TOC_ROW_RE = re.compile(
+-    r"\.{3,}\s*\|?\s*\d+\s*\|?\s*$|^\|\s*\d+(?:\.\d+)*\.?\s*\|.*\|\s*\d+\s*\|\s*$"
+-)
+-
+-# v5.9.1 WP6: metadata regexes (fixed: negative-lookbehind prevents over-matching)
+-_HEAD_NUM_RE = re.compile(r"^\s*(\d+(?:\.\d+)*?)\.?\s")
+-_DOC_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])(\d{5,}[A-Z]\d*\.[A-Za-z0-9]+)")
+-_DOC_VERSION_RE = re.compile(r"(?<![A-Za-z0-9])V(\d+(?:\.\d+)?)(?![A-Za-z0-9.])")
+-_DOC_DATE_RE = re.compile(r"(?<![\d.])(\d{1,2}\.\d{4})(?![\d.])")
+-
+-
+-def strip_markup(text: str) -> str:
+-    """Remove leaked '###', '**bold**', '*italic*' and collapse inner runs of spaces."""
+-    text = _ATX.sub("", text)
+-    text = text.replace("**", "")
+-    text = _ITALIC.sub(r"\1", text)
+-    return _INNER_SPACES.sub(" ", text)
+-
+-
+-def _collapse_sep_rows(text: str) -> str:
+-    """v5.9 WP1: Replace wide markdown separator rows with compact |---|---|.
+-
+-    MarkdownTableSerializer pads the separator to the widest cell width,
+-    inflating the repeated-header prefix past the 256-token chunk limit.
+-    """
+-    lines = text.split("\n")
+-    out = []
+-    for line in lines:
+-        stripped = line.strip()
+-        if _SEP_ROW_RE.match(stripped):
+-            cols = max(stripped.count("|") - 1, 1)
+-            line = "|" + "---|" * cols
+-        out.append(line)
+-    return "\n".join(out)
+-
+-
+-def _strip_dot_runs(text: str) -> str:
+-    """v5.9 WP1: Replace dot-leader sequences of 4+ dots with '...'."""
+-    return _DOT_RUN_RE.sub("...", text)
+-
+-
+-def _norm(s: str) -> str:
+-    return re.sub(r"\s+", " ", strip_markup(s)).strip().casefold()
+-
+-
+-def is_micro_label(text: str) -> bool:
+-    """One short line of <= 3 words with no digits (a running logo such as 'Calisthenics Family')."""
+-    t = text.strip()
+-    return "\n" not in t and len(t) < 40 and len(t.split()) <= 3 and not re.search(r"\d", t)
+-
+-
+-# -------------------------------------------------------------------------
+-# v5.9.1 WP6: section_id and extract_doc_meta
+-# -------------------------------------------------------------------------
+-
+-def section_id(page: int | None, headings: Any) -> str:
+-    """v5.9.1 WP6: 'p28:1.2' = page + number of the closest numbered heading (else 'p28')."""
+-    base = f"p{page}" if page is not None else ""
+-    for h in reversed(list(headings or [])):
+-        m = _HEAD_NUM_RE.match(str(h))
+-        if m:
+-            return f"{base}:{m.group(1)}" if base else m.group(1)
+-    return base
+-
+-
+-def extract_doc_meta(page_texts: list[str]) -> dict[str, str]:
+-    """v5.9.1 WP6: doc_number / doc_version / doc_date from the first three pages ('' if absent)."""
+-    meta = {"doc_number": "", "doc_version": "", "doc_date": ""}
+-    for text in page_texts[:3]:
+-        if not meta["doc_number"] and (m := _DOC_NUMBER_RE.search(text)):
+-            meta["doc_number"] = m.group(1)
+-        if not meta["doc_version"] and (m := _DOC_VERSION_RE.search(text)):
+-            meta["doc_version"] = f"V{m.group(1)}"
+-        if not meta["doc_date"] and (m := _DOC_DATE_RE.search(text)):
+-            meta["doc_date"] = m.group(1)
+-    return meta
+-
+-
+-# -------------------------------------------------------------------------
+-# v5.9.1 WP2: ToC tagging and merging helpers
+-# -------------------------------------------------------------------------
+-
+-def _table_lines(ls: list[str]) -> list[str]:
+-    return [x for x in ls if x.strip().startswith("|")]
+-
+-
+-def _last_heading(meta: dict[str, Any]) -> str:
+-    hp = meta.get("heading_path")
+-    if isinstance(hp, (list, tuple)):
+-        return str(hp[-1]).strip() if hp else ""
+-    return str(hp or "").split(" > ")[-1].strip()
+-
+-
+-def _is_toc_chunk(text: str, meta: dict[str, Any]) -> bool:
+-    if _TOC_HEAD_RE.match(_last_heading(meta)):
+-        return True
+-    lines = [x.strip() for x in text.split("\n") if x.strip() and not _SEP_ROW_RE.match(x.strip())]
+-    hits = sum(1 for x in lines if _TOC_ROW_RE.search(x))
+-    return hits >= 2 and hits / len(lines) >= 0.5
+-
+-
+-def _toc_lines(text: str) -> list[str]:
+-    out: list[str] = []
+-    for x in text.split("\n"):
+-        s = x.replace("[TOC]", "").replace("[Recovered text]", "").strip()
+-        if not s or _SEP_ROW_RE.match(s) or _TOC_HEAD_RE.match(s) or s.lower().startswith("table of contents"):
+-            continue
+-        s = " ".join(c.strip() for c in s.strip("|").split("|") if c.strip())
+-        s = re.sub(r"\s{2,}", " ", re.sub(r"\.{2,}", " ", s)).strip()
+-        if s:
+-            out.append(s)
+-    return out
+-
+-
+-def _union_pages(a: Any, b: Any) -> Any:
+-    def as_list(v: Any) -> list[int]:
+-        if isinstance(v, (list, tuple)):
+-            return [int(i) for i in v]
+-        return [int(i) for i in str(v or "").split(",") if i.strip().isdigit()]
+-
+-    u = sorted(set(as_list(a)) | set(as_list(b)))
+-    return u if isinstance(a, (list, tuple)) or a is None else ",".join(str(i) for i in u)
+-
+-
+-def _merge_toc(chunks: list[str], metas: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
+-    """v5.9.1 WP2: collapse every run of consecutive ToC chunks into ONE compact 'toc' chunk."""
+-    out_c: list[str] = []
+-    out_m: list[dict[str, Any]] = []
+-    run: list[str] = []
+-    run_meta: dict[str, Any] | None = None
+-    for c, m in zip(chunks, metas):
+-        if m.get("content_type") == "toc":
+-            run.extend(_toc_lines(c))
+-            if run_meta is None:
+-                run_meta = dict(m)
+-            else:
+-                run_meta["page_numbers"] = _union_pages(run_meta.get("page_numbers"), m.get("page_numbers"))
+-            continue
+-        if run_meta is not None:
+-            out_c.append("Table of contents\n" + "\n".join(dict.fromkeys(run)))
+-            out_m.append(run_meta)
+-            run, run_meta = [], None
+-        out_c.append(c)
+-        out_m.append(m)
+-    if run_meta is not None:
+-        out_c.append("Table of contents\n" + "\n".join(dict.fromkeys(run)))
+-        out_m.append(run_meta)
+-    return out_c, out_m
+-
+-
+-# -------------------------------------------------------------------------
+-# Main entry point
+-# -------------------------------------------------------------------------
+-
+-def postprocess_chunks(
+-    chunks: list[str], metas: list[dict[str, Any]], *, drop_micro: bool = False
+-) -> tuple[list[str], list[dict[str, Any]]]:
+-    """Clean chunks: collapse separators, strip dots, drop junk, merge heading-only into next.
+-
+-    v5.9.1: junk test ignores the breadcrumb lines in front of a table; a header-only table
+-    fragment is carried into the header-less table chunks that follow it; ToC chunks are tagged
+-    content_type='toc' (incl. dot-leader recovered text) and merged into a single chunk.
+-    """
+-    cleaned: list[str] = []
+-    for c in chunks:
+-        c = strip_markup(c).strip()
+-        c = _collapse_sep_rows(c)
+-        c = _strip_dot_runs(c)
+-        cleaned.append(c)
+-
+-    lines_list = [c.split("\n") for c in cleaned]
+-    has_table = [bool(_table_lines(x)) for x in lines_list]
+-    n = len(lines_list)
+-
+-    pending_heading: str = ""
+-    table_hdr: list[str] | None = None
+-    out_chunks: list[str] = []
+-    out_metas: list[dict[str, Any]] = []
+-
+-    for i, ls in enumerate(lines_list):
+-        nxt = {_norm(x) for x in lines_list[i + 1][:3]} if i + 1 < n else set()
+-
+-        # Drop trailing line that is really the NEXT chunk's heading (v5.8)
+-        if len(ls) > 1 and nxt:
+-            last = ls[-1].strip()
+-            if last and len(last) <= 120 and not last.startswith("|") and _norm(last) in nxt:
+-                ls = ls[:-1]
+-
+-        text = "\n".join(ls).strip()
+-        tl = _table_lines(ls)
+-        non_tl = [x for x in ls if x.strip() and not x.strip().startswith("|")]
+-
+-        # Drop separator-only junk, also when a breadcrumb sits in front of it (v5.9.1)
+-        if _JUNK_CHUNK_RE.match(text) or (
+-            tl and len(non_tl) <= 3 and all(_JUNK_CHUNK_RE.match(x.strip()) for x in tl)
+-        ):
+-            continue
+-
+-        if drop_micro and is_micro_label(text):
+-            continue
+-
+-        norms = {_norm(x) for x in ls if x.strip()}
+-
+-        if nxt and norms and norms <= nxt:
+-            pending_heading = text if not pending_heading else pending_heading + "\n" + text
+-            continue
+-
+-        # v5.9.1: table header bookkeeping
+-        if not tl or any(_SEP_ROW_RE.match(x.strip()) for x in tl):
+-            table_hdr = None
+-        elif (
+-            len(tl) == 1 and i + 1 < n and has_table[i + 1]
+-            and not (i > 0 and has_table[i - 1] and _last_heading(metas[i - 1]) == _last_heading(metas[i]))
+-        ):
+-            hdr = tl[0].strip()
+-            if not hdr.endswith("|"):
+-                hdr += " |"
+-            table_hdr = [hdr, "|" + "---|" * max(hdr.count("|") - 1, 1)]
+-            continue  # header-only fragment: re-attached to the chunks below
+-        elif table_hdr:
+-            first = next(j for j, x in enumerate(ls) if x.strip().startswith("|"))
+-            text = "\n".join(ls[:first] + table_hdr + ls[first:])
+-
+-        if pending_heading:
+-            text = pending_heading + "\n" + text
+-            pending_heading = ""
+-
+-        out_chunks.append(text)
+-        out_metas.append(metas[i])
+-
+-    if pending_heading:
+-        out_chunks.append(pending_heading)
+-        if metas:
+-            out_metas.append(metas[-1])
+-
+-    # v5.9.1 WP2: tag + merge ToC chunks
+-    tagged: list[dict[str, Any]] = []
+-    for c, m in zip(out_chunks, out_metas):
+-        if m.get("content_type") != "toc" and _is_toc_chunk(c, m):
+-            m = {**m, "content_type": "toc"}
+-        tagged.append(m)
+-    return _merge_toc(out_chunks, tagged)
++"""v5.9 chunk-level sanitiser (extends v5.8). Pure Python — no Docling imports.
++
++v5.8: strip_markup, postprocess_chunks (echo/micro drop).
++v5.9 WP1: _collapse_sep_rows, _strip_dot_runs, heading-merge, junk-drop.
++v5.9.1:
++  WP1: junk test ignores the breadcrumb lines in front of a table; a header-only table
++       fragment is carried into the header-less table chunks that follow it.
++  WP2: ToC chunks are tagged content_type='toc' and merged into a single compact chunk.
++  WP6: section_id() returns 'p28:1.2'; extract_doc_meta() extracts doc_number/version/date
++       with fixed regexes (negative-lookbehind prevents over-matching GB0_V2).
++"""
++from __future__ import annotations
++
++import re
++from typing import Any
++
++_ATX = re.compile(r"(?m)(?:^|(?<=[ \t]))(?:#{2,6}|#(?=[ \t]*\*\*))[ \t]*")
++_ITALIC = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
++_INNER_SPACES = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)")
++_SEP_ROW_RE = re.compile(r"^\|(\s*:?-{2,}:?\s*\|)+\s*$")   # v5.9 WP1
++_DOT_RUN_RE = re.compile(r"\.{4,}")                          # v5.9 WP1
++_JUNK_CHUNK_RE = re.compile(r"^[\s|:\-.]*$")                  # v5.9 WP1
++
++# v5.9.1 WP2: ToC detection
++_TOC_HEAD_RE = re.compile(r"^(?:table of )?contents?\W*$|^inhalt(?:sverzeichnis)?\W*$", re.I)
++_TOC_ROW_RE = re.compile(
++    r"\.{3,}\s*\|?\s*\d+\s*\|?\s*$|^\|\s*\d+(?:\.\d+)*\.?\s*\|.*\|\s*\d+\s*\|\s*$"
++)
++
++# v5.9.2: reflowed ToC. PyMuPDF4LLM joins the lines of a ToC page and the dot leaders are gone by
++# the time detection runs, so the dot-leader test above never fires on continuation pages
++# ("... tunnel socket) 9 2.4 Inserting the connection board ... 10 2.5 Installation ... 12").
++# Count "section-number title page-number" entries instead.
++_TOC_ENTRY_RE = re.compile(
++    r"(?<![\w.])\d+(?:\.\d+){0,3}\.?\s+[A-Za-z(][^\n|]{2,90}?\s+\d{1,3}"
++    r"(?=\s+\d+(?:\.\d+){0,3}\.?\s+[A-Za-z(]|\s*$)",
++    re.M,
++)
++
++# v5.9.1 WP6: metadata regexes (fixed: negative-lookbehind prevents over-matching)
++_HEAD_NUM_RE = re.compile(r"^\s*(\d+(?:\.\d+)*?)\.?\s")
++_DOC_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])(\d{5,}[A-Z]\d*\.[A-Za-z0-9]+)")
++_DOC_VERSION_RE = re.compile(r"(?<![A-Za-z0-9])V(\d+(?:\.\d+)?)(?![A-Za-z0-9.])")
++_DOC_DATE_RE = re.compile(r"(?<![\d.])(\d{1,2}\.\d{4})(?![\d.])")
++
++
++def strip_markup(text: str) -> str:
++    """Remove leaked '###', '**bold**', '*italic*' and collapse inner runs of spaces."""
++    text = _ATX.sub("", text)
++    text = text.replace("**", "")
++    text = _ITALIC.sub(r"\1", text)
++    return _INNER_SPACES.sub(" ", text)
++
++
++def _collapse_sep_rows(text: str) -> str:
++    """v5.9 WP1: Replace wide markdown separator rows with compact |---|---|.
++
++    MarkdownTableSerializer pads the separator to the widest cell width,
++    inflating the repeated-header prefix past the 256-token chunk limit.
++    """
++    lines = text.split("\n")
++    out = []
++    for line in lines:
++        stripped = line.strip()
++        if _SEP_ROW_RE.match(stripped):
++            cols = max(stripped.count("|") - 1, 1)
++            line = "|" + "---|" * cols
++        out.append(line)
++    return "\n".join(out)
++
++
++def _strip_dot_runs(text: str) -> str:
++    """v5.9 WP1: Replace dot-leader sequences of 4+ dots with '...'."""
++    return _DOT_RUN_RE.sub("...", text)
++
++
++def _norm(s: str) -> str:
++    return re.sub(r"\s+", " ", strip_markup(s)).strip().casefold()
++
++
++def is_micro_label(text: str) -> bool:
++    """One short line of <= 3 words with no digits (a running logo such as 'Calisthenics Family')."""
++    t = text.strip()
++    return "\n" not in t and len(t) < 40 and len(t.split()) <= 3 and not re.search(r"\d", t)
++
++
++# -------------------------------------------------------------------------
++# v5.9.1 WP6: section_id and extract_doc_meta
++# -------------------------------------------------------------------------
++
++def section_id(page: int | None, headings: Any) -> str:
++    """v5.9.1 WP6: 'p28:1.2' = page + number of the closest numbered heading (else 'p28')."""
++    base = f"p{page}" if page is not None else ""
++    for h in reversed(list(headings or [])):
++        m = _HEAD_NUM_RE.match(str(h))
++        if m:
++            return f"{base}:{m.group(1)}" if base else m.group(1)
++    return base
++
++
++def extract_doc_meta(page_texts: list[str]) -> dict[str, str]:
++    """v5.9.1 WP6: doc_number / doc_version / doc_date from the first three pages ('' if absent)."""
++    meta = {"doc_number": "", "doc_version": "", "doc_date": ""}
++    for text in page_texts[:3]:
++        if not meta["doc_number"] and (m := _DOC_NUMBER_RE.search(text)):
++            meta["doc_number"] = m.group(1)
++        if not meta["doc_version"] and (m := _DOC_VERSION_RE.search(text)):
++            meta["doc_version"] = f"V{m.group(1)}"
++        if not meta["doc_date"] and (m := _DOC_DATE_RE.search(text)):
++            meta["doc_date"] = m.group(1)
++    return meta
++
++
++# -------------------------------------------------------------------------
++# v5.9.1 WP2: ToC tagging and merging helpers
++# -------------------------------------------------------------------------
++
++def _table_lines(ls: list[str]) -> list[str]:
++    return [x for x in ls if x.strip().startswith("|")]
++
++
++def _last_heading(meta: dict[str, Any]) -> str:
++    hp = meta.get("heading_path")
++    if isinstance(hp, (list, tuple)):
++        return str(hp[-1]).strip() if hp else ""
++    return str(hp or "").split(" > ")[-1].strip()
++
++
++def _toc_entry_stats(text: str) -> tuple[int, float]:
++    """(number of 'N.N Title page' entries, share of the text they cover)."""
++    ms = list(_TOC_ENTRY_RE.finditer(text))
++    return len(ms), sum(len(m.group()) for m in ms) / max(1, len(text))
++
++
++def _is_toc_chunk(text: str, meta: dict[str, Any], prev_is_toc: bool = False) -> bool:
++    if _TOC_HEAD_RE.match(_last_heading(meta)):
++        return True
++    lines = [x.strip() for x in text.split("\n") if x.strip() and not _SEP_ROW_RE.match(x.strip())]
++    hits = sum(1 for x in lines if _TOC_ROW_RE.search(x))
++    if hits >= 2 and hits / len(lines) >= 0.5:
++        return True
++    # v5.9.2: reflowed ToC rows without dot leaders; a ToC that continues on the next page has
++    # no 'Contents' heading, so a chunk right after a ToC chunk needs far less evidence.
++    n, cov = _toc_entry_stats(text)
++    if (n >= 4 and cov >= 0.55) or (prev_is_toc and n >= 2 and cov >= 0.4):
++        return True
++    low = text.lower()
++    return prev_is_toc and n == 0 and "table of contents" in low and len(text) < 400
++
++
++def _toc_lines(text: str) -> list[str]:
++    out: list[str] = []
++    for x in text.split("\n"):
++        s = x.replace("[TOC]", "").replace("[Recovered text]", "").strip()
++        if not s or _SEP_ROW_RE.match(s) or _TOC_HEAD_RE.match(s) or s.lower().startswith("table of contents"):
++            continue
++        s = " ".join(c.strip() for c in s.strip("|").split("|") if c.strip())
++        s = re.sub(r"\s{2,}", " ", re.sub(r"\.{2,}", " ", s)).strip()
++        # v5.9.2: keep real entries only - running headers have no page number, legal prose is long
++        if s and (_TOC_ENTRY_RE.search(s) or (len(s) <= 80 and re.search(r"\d", s))):
++            out.append(s)
++    return out
++
++
++def _union_pages(a: Any, b: Any) -> Any:
++    def as_list(v: Any) -> list[int]:
++        if isinstance(v, (list, tuple)):
++            return [int(i) for i in v]
++        return [int(i) for i in str(v or "").split(",") if i.strip().isdigit()]
++
++    u = sorted(set(as_list(a)) | set(as_list(b)))
++    return u if isinstance(a, (list, tuple)) or a is None else ",".join(str(i) for i in u)
++
++
++def _merge_toc(chunks: list[str], metas: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
++    """v5.9.1 WP2: collapse every run of consecutive ToC chunks into ONE compact 'toc' chunk."""
++    out_c: list[str] = []
++    out_m: list[dict[str, Any]] = []
++    run: list[str] = []
++    run_meta: dict[str, Any] | None = None
++    for c, m in zip(chunks, metas):
++        if m.get("content_type") == "toc":
++            run.extend(_toc_lines(c))
++            if run_meta is None:
++                run_meta = dict(m)
++            else:
++                run_meta["page_numbers"] = _union_pages(run_meta.get("page_numbers"), m.get("page_numbers"))
++            continue
++        if run_meta is not None:
++            out_c.append("Table of contents\n" + "\n".join(dict.fromkeys(run)))
++            out_m.append(run_meta)
++            run, run_meta = [], None
++        out_c.append(c)
++        out_m.append(m)
++    if run_meta is not None:
++        out_c.append("Table of contents\n" + "\n".join(dict.fromkeys(run)))
++        out_m.append(run_meta)
++    return out_c, out_m
++
++
++# -------------------------------------------------------------------------
++# Main entry point
++# -------------------------------------------------------------------------
++
++def postprocess_chunks(
++    chunks: list[str], metas: list[dict[str, Any]], *, drop_micro: bool = False
++) -> tuple[list[str], list[dict[str, Any]]]:
++    """Clean chunks: collapse separators, strip dots, drop junk, merge heading-only into next.
++
++    v5.9.1: junk test ignores the breadcrumb lines in front of a table; a header-only table
++    fragment is carried into the header-less table chunks that follow it; ToC chunks are tagged
++    content_type='toc' (incl. dot-leader recovered text) and merged into a single chunk.
++    """
++    cleaned: list[str] = []
++    for c in chunks:
++        c = strip_markup(c).strip()
++        c = _collapse_sep_rows(c)
++        c = _strip_dot_runs(c)
++        cleaned.append(c)
++
++    lines_list = [c.split("\n") for c in cleaned]
++    has_table = [bool(_table_lines(x)) for x in lines_list]
++    n = len(lines_list)
++
++    pending_heading: str = ""
++    table_hdr: list[str] | None = None
++    out_chunks: list[str] = []
++    out_metas: list[dict[str, Any]] = []
++
++    for i, ls in enumerate(lines_list):
++        nxt = {_norm(x) for x in lines_list[i + 1][:3]} if i + 1 < n else set()
++
++        # Drop trailing line that is really the NEXT chunk's heading (v5.8)
++        if len(ls) > 1 and nxt:
++            last = ls[-1].strip()
++            if last and len(last) <= 120 and not last.startswith("|") and _norm(last) in nxt:
++                ls = ls[:-1]
++
++        text = "\n".join(ls).strip()
++        tl = _table_lines(ls)
++        non_tl = [x for x in ls if x.strip() and not x.strip().startswith("|")]
++
++        # Drop separator-only junk, also when a breadcrumb sits in front of it (v5.9.1)
++        if _JUNK_CHUNK_RE.match(text) or (
++            tl and len(non_tl) <= 3 and all(_JUNK_CHUNK_RE.match(x.strip()) for x in tl)
++        ):
++            continue
++
++        if drop_micro and is_micro_label(text):
++            continue
++
++        norms = {_norm(x) for x in ls if x.strip()}
++
++        if nxt and norms and norms <= nxt:
++            pending_heading = text if not pending_heading else pending_heading + "\n" + text
++            continue
++
++        # v5.9.1: table header bookkeeping
++        if not tl or any(_SEP_ROW_RE.match(x.strip()) for x in tl):
++            table_hdr = None
++        elif (
++            len(tl) == 1 and i + 1 < n and has_table[i + 1]
++            and not (i > 0 and has_table[i - 1] and _last_heading(metas[i - 1]) == _last_heading(metas[i]))
++        ):
++            hdr = tl[0].strip()
++            if not hdr.endswith("|"):
++                hdr += " |"
++            table_hdr = [hdr, "|" + "---|" * max(hdr.count("|") - 1, 1)]
++            continue  # header-only fragment: re-attached to the chunks below
++        elif table_hdr:
++            first = next(j for j, x in enumerate(ls) if x.strip().startswith("|"))
++            text = "\n".join(ls[:first] + table_hdr + ls[first:])
++
++        if pending_heading:
++            text = pending_heading + "\n" + text
++            pending_heading = ""
++
++        out_chunks.append(text)
++        out_metas.append(metas[i])
++
++    if pending_heading:
++        out_chunks.append(pending_heading)
++        if metas:
++            out_metas.append(metas[-1])
++
++    # v5.9.1 WP2: tag + merge ToC chunks
++    tagged: list[dict[str, Any]] = []
++    prev_toc = False
++    for c, m in zip(out_chunks, out_metas):
++        is_toc = m.get("content_type") == "toc" or _is_toc_chunk(c, m, prev_toc)
++        if is_toc and m.get("content_type") != "toc":
++            m = {**m, "content_type": "toc"}
++        prev_toc = is_toc
++        tagged.append(m)
++    return _merge_toc(out_chunks, tagged)
+diff -ruN a/parsers/pdf_cellmarks.py b/parsers/pdf_cellmarks.py
+--- a/parsers/pdf_cellmarks.py	2026-10-16 04:35:42.131737117 +0000
++++ b/parsers/pdf_cellmarks.py	2026-10-16 04:36:06.914540930 +0000
+@@ -1,7 +1,8 @@
+ """v5.9 WP3: Availability-mark injection for PDF table cells.
+ 
+ Detects tick-mark images in table cells → converts to Yes/No text.
+-Called from pdf_router._docling_page() and _smolvlm_page() before export_to_markdown().
++v5.9.2: image ticks are located by image centre (not strict containment) and written so they
++survive Docling's computed grid. Called from pdf_router._docling_page() and _smolvlm_page() before export_to_markdown().
+ """
+ from __future__ import annotations
+ 
+@@ -122,6 +123,102 @@
+             logger.warning("cellmarks: table processing failed: %s", exc)
+ 
+ 
++_SNAP_TOL = 3.0        # v5.9.2: centre-in-cell tolerance (pt); TableFormer boxes are not pixel exact
++_SNAP_PITCH = 0.75     # v5.9.2: max distance to a row/col centre, as a fraction of the row/col pitch
++
++
++def _is_tick_colour(page, x0, y0, x1, y1) -> bool:
++    """v5.9.2: stricter than _is_greenish - judged on the non-white pixels only."""
++    try:
++        import fitz
++        pm = page.get_pixmap(clip=fitz.Rect(x0, y0, x1, y1), colorspace=fitz.csRGB, alpha=False)
++        s = pm.samples
++        ink = green = 0
++        for i in range(0, len(s) - 2, 3):
++            r, g, b = s[i], s[i + 1], s[i + 2]
++            if min(r, g, b) >= 215:
++                continue
++            ink += 1
++            if g > r + 15 and g > b + 15:
++                green += 1
++        return ink > 0 and green / ink >= 0.6
++    except Exception:
++        return False
++
++
++def _median(vals):
++    v = sorted(vals)
++    return v[len(v) // 2] if v else None
++
++
++def _axes(cells):
++    """Median centre per column / row index from the single-span cells that carry indices."""
++    cols: dict[int, list[float]] = {}
++    rows: dict[int, list[float]] = {}
++    for cell, (l, t, r, b) in cells:
++        ri = getattr(cell, "start_row_offset_idx", None)
++        ci = getattr(cell, "start_col_offset_idx", None)
++        if ri is None or ci is None:
++            continue
++        if getattr(cell, "end_col_offset_idx", ci + 1) - ci == 1:
++            cols.setdefault(ci, []).append((l + r) / 2)
++        if getattr(cell, "end_row_offset_idx", ri + 1) - ri == 1:
++            rows.setdefault(ri, []).append((t + b) / 2)
++    return ({k: _median(v) for k, v in cols.items()}, {k: _median(v) for k, v in rows.items()})
++
++
++def _nearest(axis: dict[int, float], v: float):
++    if not axis:
++        return None
++    k = min(axis, key=lambda i: abs(axis[i] - v))
++    pts = sorted(axis.values())
++    pitch = _median([b - a for a, b in zip(pts, pts[1:])]) if len(pts) > 1 else None
++    if pitch and abs(axis[k] - v) > _SNAP_PITCH * pitch:
++        return None
++    return k
++
++
++def _write_position(table_item, r: int, c: int, text: str) -> bool:
++    """v5.9.2: write `text` into grid position (r, c) in a way that survives export.
++
++    docling-core builds `grid` fresh on every access and fills cells that have no content with
++    new blank placeholders, so `grid[r][c].text = ...` on an empty cell is silently lost. Write
++    into `table_cells` instead (adding a cell when none covers the position)."""
++    data = table_item.data
++    tcs = getattr(data, "table_cells", None)
++    if tcs is None:
++        try:
++            data.grid[r][c].text = text
++            return True
++        except Exception:
++            return False
++    for tc in tcs:
++        if (tc.start_row_offset_idx <= r < tc.end_row_offset_idx
++                and tc.start_col_offset_idx <= c < tc.end_col_offset_idx):
++            tc.text = text
++            return True
++    if not tcs:
++        return False
++    upd = dict(text=text, row_span=1, col_span=1, start_row_offset_idx=r, end_row_offset_idx=r + 1,
++               start_col_offset_idx=c, end_col_offset_idx=c + 1, column_header=False,
++               row_header=False, bbox=None)
++    proto = tcs[0]
++    if hasattr(proto, "model_copy"):
++        new = proto.model_copy(update=upd)
++    else:
++        import copy
++        new = copy.copy(proto)
++        for k, v in upd.items():
++            setattr(new, k, v)
++    tcs.append(new)
++    return True
++
++
++def _mark_text(old: str) -> str:
++    old = (old or "").strip()
++    return "Yes" if (not old or old in ("...", "\u2026")) else f"Yes ({old})"
++
++
+ def _process_table(table_item, all_images, page_fitz, page_height, legend, repeat_min):
+     grid = table_item.data.grid
+     if not grid:
+@@ -143,6 +240,17 @@
+     if not cells:
+         return
+ 
++    # v5.9.2: v5.9.1 required a tick image to lie FULLY inside one cell box (2 pt tolerance).
++    # That passed the offline test (exact PyMuPDF ruling-line rectangles) but not on real Docling
++    # output, whose TableFormer boxes are approximate and whose empty cells are blank placeholders.
++    # Now: the image CENTRE must fall in a cell box (+3 pt) or snap to the nearest row/column.
++    tl_ = min(bb[0] for _, bb in cells) - _SNAP_TOL
++    tt_ = min(bb[1] for _, bb in cells) - _SNAP_TOL
++    tr_ = max(bb[2] for _, bb in cells) + _SNAP_TOL
++    tb_ = max(bb[3] for _, bb in cells) + _SNAP_TOL
++    col_x, row_y = _axes(cells)
++
++    n_small = 0
+     candidates = []
+     for img in all_images:
+         ib = img.get("bbox") or img.get("rect")
+@@ -155,68 +263,87 @@
+         asp = w / h
+         if not (_ASPECT_MIN <= asp <= _ASPECT_MAX):
+             continue
+-        in_cell = any(_inside(ix0, iy0, ix1, iy1, *pm) for _, pm in cells)
+-        if not in_cell:
++        cx, cy = (ix0 + ix1) / 2, (iy0 + iy1) / 2
++        if not (tl_ <= cx <= tr_ and tt_ <= cy <= tb_):
+             continue
++        n_small += 1
+         xref = img.get("xref", 0)
+-        candidates.append({"bbox": (ix0, iy0, ix1, iy1), "xref": xref,
++        candidates.append({"bbox": (ix0, iy0, ix1, iy1), "c": (cx, cy), "xref": xref,
+                            "hash": _cand_hash(img, page_fitz, xref)})
+ 
+-    if not candidates:
+-        for cell, _ in cells:
+-            _apply_dots(cell, legend)
+-        return
++    def locate(c):
++        """-> (cell | None, (row, col) | None) for a candidate image."""
++        cx, cy = c["c"]
++        hit = [(cell, bb) for cell, bb in cells
++               if bb[0] - _SNAP_TOL <= cx <= bb[2] + _SNAP_TOL and bb[1] - _SNAP_TOL <= cy <= bb[3] + _SNAP_TOL]
++        if hit:
++            cell = min(hit, key=lambda x: (x[1][2] - x[1][0]) * (x[1][3] - x[1][1]))[0]
++            return cell, (getattr(cell, "start_row_offset_idx", None), getattr(cell, "start_col_offset_idx", None))
++        ci, ri = _nearest(col_x, cx), _nearest(row_y, cy)
++        return (None, (ri, ci)) if ri is not None and ci is not None else (None, None)
+ 
+     hash_count: dict[str, int] = {}
+     for cand in candidates:
+-        h = cand["hash"]
+-        if h:
+-            hash_count[h] = hash_count.get(h, 0) + 1
+-
+-    mark_hashes = {h for h, c in hash_count.items() if c >= repeat_min}
++        if cand["hash"]:
++            hash_count[cand["hash"]] = hash_count.get(cand["hash"], 0) + 1
++    mark_hashes = {h for h, n in hash_count.items() if n >= repeat_min}
+ 
+     col_img_count: dict[int, int] = {}
+     col_total: dict[int, int] = {}
+     for row_i, row in enumerate(grid):
+         for col_i, cell in enumerate(row):
+-            if row_i == 0:
+-                continue
+-            col_total[col_i] = col_total.get(col_i, 0) + 1
++            if row_i:
++                col_total[col_i] = col_total.get(col_i, 0) + 1
+ 
++    marked_cells: set[int] = set()
++    marked_pos: set[tuple] = set()
+     n_marked = 0
+-    for cell, (cx0, cy0, cx1, cy1) in cells:
+-        col_i = getattr(cell, "start_col_offset_idx", -1)
+-        mark_found = False
+-
+-        for cand in candidates:
+-            ix0, iy0, ix1, iy1 = cand["bbox"]
+-            if not _inside(ix0, iy0, ix1, iy1, cx0, cy0, cx1, cy1):
+-                continue
+-            h = cand["hash"]
+-            if not h or h not in mark_hashes:
+-                col_img_count[col_i] = col_img_count.get(col_i, 0) + 1
+-                continue
+-            if not _is_greenish(page_fitz, ix0, iy0, ix1, iy1):
+-                continue
+-            mark_found = True
+-            break
+-
+-        if mark_found:
++    for cand in candidates:
++        cell, pos = locate(cand)
++        ix0, iy0, ix1, iy1 = cand["bbox"]
++        if mark_hashes:                      # repeated image: the classic tick
++            is_mark = cand["hash"] in mark_hashes and _is_greenish(page_fitz, ix0, iy0, ix1, iy1)
++        else:                                # digests missing / all different: judge by colour
++            is_mark = _is_tick_colour(page_fitz, ix0, iy0, ix1, iy1)
++        if not is_mark:
++            if cell is not None:
++                ci = getattr(cell, "start_col_offset_idx", -1)
++                col_img_count[ci] = col_img_count.get(ci, 0) + 1
++            continue
++        if cell is not None and id(cell) in marked_cells:
++            continue
++        if cell is None and (pos is None or pos in marked_pos):
++            continue
++        if cell is not None:
++            cell.text = _mark_text(cell.text)
++            marked_cells.add(id(cell))
+             n_marked += 1
+-            old = (cell.text or "").strip()
+-            if not old or old in ("...", "..."):
+-                cell.text = "Yes"
+-            else:
+-                cell.text = f"Yes ({old})"
+         else:
+-            _apply_dots(cell, legend)
+-            if not (cell.text or "").strip():
+-                ocr = _ocr_cell(page_fitz, cx0, cy0, cx1, cy1)
+-                if ocr:
+-                    cell.text = ocr
++            r, c_ = pos
++            try:
++                old = grid[r][c_].text
++            except Exception:
++                old = ""
++            if _write_position(table_item, r, c_, _mark_text(old)):
++                marked_pos.add(pos)
++                n_marked += 1
+ 
+-    logger.info("cellmarks: %d cells, %d candidate imgs, %d mark hashes, %d cells marked",
+-                len(cells), len(candidates), len(mark_hashes), n_marked)
++    for cell, (cx0, cy0, cx1, cy1) in cells:
++        if id(cell) in marked_cells:
++            continue
++        pos = (getattr(cell, "start_row_offset_idx", None), getattr(cell, "start_col_offset_idx", None))
++        if pos in marked_pos:
++            continue
++        _apply_dots(cell, legend)
++        if not (cell.text or "").strip():
++            ocr = _ocr_cell(page_fitz, cx0, cy0, cx1, cy1)
++            if ocr:
++                cell.text = ocr
++
++    # v5.9.2: always visible in the console when small images were seen but none became a mark.
++    (logger.warning if (n_small and not n_marked) else logger.info)(
++        "cellmarks: %d cells, %d small imgs in table, %d repeated-hash groups, %d cells marked",
++        len(cells), n_small, len(mark_hashes), n_marked)
+     header_row = grid[0] if grid else []
+     for col_i, img_c in col_img_count.items():
+         total = col_total.get(col_i, 1)
+diff -ruN a/parsers/pdf_glyphs.py b/parsers/pdf_glyphs.py
+--- a/parsers/pdf_glyphs.py	1970-01-01 00:00:00.000000000 +0000
++++ b/parsers/pdf_glyphs.py	2026-10-17 09:00:10.415758643 +0000
+@@ -0,0 +1,66 @@
++"""v5.9.2: map Wingdings / Symbol private-use glyphs to real text.
++
++Why: Honeywell manuals draw ticks, arrows and circled call-out numbers with the Wingdings font.
++Both PyMuPDF4LLM and Docling return those glyphs as private-use code points (U+F0xx), e.g. a
++feature-table tick is U+F0FC. They render as blanks / boxes, are useless to an embedding model,
++and were never touched by v5.9 / v5.9.1 (which only looked for tick *images*).
++
++Pure Python, no third-party imports.
++"""
++from __future__ import annotations
++
++import re
++
++_PUA_RE = re.compile("[\ue000-\uf8ff]")
++
++_TICKS = frozenset({"\uf0fc", "\uf0fe"})   # Wingdings 0xFC check, 0xFE ballot box with check
++_CROSSES = frozenset({"\uf0fb", "\uf0fd"})  # Wingdings 0xFB cross, 0xFD ballot box with x
++
++# Running-text replacements. Wingdings 0x81..0x8A are the circled numbers 1..10.
++_TEXT_MAP: dict[str, str] = {
++    "\uf0fc": "\u2713", "\uf0fe": "\u2713",
++    "\uf0fb": "\u2717", "\uf0fd": "\u2717",
++    "\uf0e8": "\u2192",                                   # Wingdings 0xE8 arrow
++    "\uf0b7": "\u2022", "\uf0a7": "\u2022", "\uf06c": "\u2022",   # bullets
++    "\uf076": "\u2022", "\uf0d8": "\u2022",
++}
++_TEXT_MAP.update({chr(0xF081 + i): chr(0x2460 + i) for i in range(10)})   # F081.. -> 1..10 in circles
++
++_CELL_NOISE_RE = re.compile(r"(\*\*|<br\s*/?>|\s)")
++
++
++def _cell_core(cell: str) -> str:
++    return _CELL_NOISE_RE.sub("", cell)
++
++
++def _fix_table_line(line: str) -> str:
++    parts = line.split("|")
++    for i, cell in enumerate(parts):
++        core = _cell_core(cell)
++        if not core:
++            continue
++        chars = set(core)
++        if chars <= _TICKS:
++            parts[i] = " Yes "
++        elif chars <= _CROSSES:
++            parts[i] = " No "
++    return "|".join(parts)
++
++
++def normalize_glyphs(md: str) -> str:
++    """Page markdown: a table cell that is only a tick -> 'Yes' (cross -> 'No'); every other
++    private-use glyph is mapped through _TEXT_MAP, unknown ones are dropped."""
++    if not md or not _PUA_RE.search(md):
++        return md
++    out = []
++    for line in md.split("\n"):
++        if line.lstrip().startswith("|"):
++            line = _fix_table_line(line)
++        out.append(_PUA_RE.sub(lambda m: _TEXT_MAP.get(m.group(), ""), line))
++    return "\n".join(out)
++
++
++def strip_glyphs(text: str) -> str:
++    """Raw PyMuPDF page text (used only for the coverage comparison): drop private-use glyphs
++    so they are not reported as 'missing words'."""
++    return _PUA_RE.sub("", text) if text else text
+diff -ruN a/parsers/pdf_router.py b/parsers/pdf_router.py
+--- a/parsers/pdf_router.py	2026-10-16 04:35:42.136229163 +0000
++++ b/parsers/pdf_router.py	2026-10-16 04:36:21.583049360 +0000
+@@ -134,6 +134,7 @@
+ )
+ from . import pdf_cleanup, pdf_structure  # v5.7
+ from . import pdf_cellmarks  # v5.9 WP3
++from . import pdf_glyphs  # v5.9.2
+ from . import pdf_coverage   # v5.9 WP4
+ from . import pdf_figures    # v5.9 WP5
+ 
+@@ -907,6 +908,13 @@
+         combined = DoclingDocument(name=filename.rsplit(".", 1)[0])
+         converter = DocumentConverter(allowed_formats=[InputFormat.MD])
+ 
++        # v5.9.2: every route (text / Docling / SmolVLM) ends up here. Map Wingdings/Symbol
++        # private-use glyphs (ticks, arrows, circled call-out numbers) to real text, and drop them
++        # from the raw page text so coverage does not report them as missing words.
++        page_markdowns = [pdf_glyphs.normalize_glyphs(md) for md in page_markdowns]
++        if page_raw_texts:
++            page_raw_texts = [pdf_glyphs.strip_glyphs(t) for t in page_raw_texts]
++
+         # v5.7: strip running footers, then clean each page's markdown (markup, glued
+         # words, picture-text debris, table normalisation) before Docling parses it.
+         if settings.pdf_v57_cleanup:
+diff -ruN a/tests/parsing_arch/v5_9/test_v5_9_2.py b/tests/parsing_arch/v5_9/test_v5_9_2.py
+--- a/tests/parsing_arch/v5_9/test_v5_9_2.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/parsing_arch/v5_9/test_v5_9_2.py	2026-10-17 08:59:45.080763229 +0000
+@@ -0,0 +1,177 @@
++"""v5.9.2 offline checks - pure Python (+ PyMuPDF for the synthetic tick page), no Docling needed.
++
++Run from the repo root:   python -m pytest tests/parsing_arch/v5_9/test_v5_9_2.py -q
++Set V592_STIP_PDF to 89470J4.GB0.pdf to enable the real-PDF glyph check.
++"""
++import importlib.util
++import os
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++_REPO = Path(__file__).resolve().parents[3]
++sys.path.insert(0, str(_REPO))
++
++
++def _load(rel: str):
++    p = _REPO / rel
++    spec = importlib.util.spec_from_file_location(p.stem, p)
++    mod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(mod)
++    return mod
++
++
++glyphs = _load("parsers/pdf_glyphs.py")
++cc = _load("core/chunk_cleanup.py")
++STIP = os.getenv("V592_STIP_PDF", "")
++
++
++# ------------------------------------------------------------------ glyphs
++def test_pymupdf4llm_tick_row_becomes_yes():
++    row = "|Power in<br>24 V / 10 A|**Power supply**|\uf0fc|\uf0fc|**\u2026**|\uf0fc|"
++    out = glyphs.normalize_glyphs(row)
++    assert out.count("Yes") == 3 and "\uf0fc" not in out
++
++
++def test_circled_numbers_follow_wingdings_order():
++    assert glyphs.normalize_glyphs("hooks \uf087, state \uf088, plug \uf083") == "hooks \u2466, state \u2467, plug \u2462"
++
++
++def test_arrow_and_unknown_private_use_glyph():
++    assert glyphs.normalize_glyphs("Position \uf0e8 Unlock level\ue123") == "Position \u2192 Unlock level"
++
++
++def test_tick_in_prose_is_kept_as_tick_not_yes():
++    assert glyphs.normalize_glyphs("\uf0fc = available") == "\u2713 = available"
++
++
++def test_strip_glyphs_for_coverage():
++    assert glyphs.strip_glyphs("A \uf0fc B") == "A  B"
++
++
++@pytest.mark.skipif(not STIP or not Path(STIP).exists(), reason="V592_STIP_PDF not set")
++def test_real_stip_page16_has_no_private_use_left():
++    import pymupdf
++    import pymupdf4llm
++    md = pymupdf4llm.to_markdown(pymupdf.open(STIP), pages=[15])
++    assert "\uf0fc" in md                      # the bug: raw glyphs reach the chunk text
++    fixed = glyphs.normalize_glyphs(md)
++    assert not any("\ue000" <= ch <= "\uf8ff" for ch in fixed)
++    assert fixed.count("Yes") >= 30
++
++
++# ------------------------------------------------------------------ ToC
++STIP_TOC_P3 = (
++    "Systevo Touch IP (STIP)\n\u00a9 Honeywell International Inc./technical changes reserved!\n"
++    "tunnel socket) 9 2.4 Inserting the connection board into the bottom housing panel 10 "
++    "2.5 Installation of the Touch terminal and connection board 12 2.6 Removing the Touch terminal "
++    "from the bottom housing panel / connection board 15 3 Electrical connection 16 3.1 Connection "
++    "board versions 17 3.1.1 Connection board 79CM307Z1 data bus mode 17 3.1.2 Connection board "
++    "79CM307Z2 IP+ mode 18"
++)
++BODY_SECTION_LIST = (
++    "7 Pre-defined profiles\n7.1 Profile 1\n7.1.1 Connection examples of passive components in "
++    "profile 1\nBy default, if profile 1 is selected, the outputs of I/O ports 1-4 are allocated "
++    "to the functions presence 1, call and BATHROOM / WC."
++)
++
++
++def test_reflowed_toc_continuation_is_toc_after_a_toc_chunk():
++    meta = {"content_type": "text", "heading_path": "Systevo Touch IP (STIP)"}
++    assert cc._is_toc_chunk(STIP_TOC_P3, meta, prev_is_toc=False)       # dense enough on its own
++    assert cc._is_toc_chunk(STIP_TOC_P3[:200] + " 17 3.2 x 18", meta, prev_is_toc=True)
++
++
++def test_body_text_with_section_numbers_is_not_toc():
++    meta = {"content_type": "text", "heading_path": "7 Pre-defined profiles"}
++    assert not cc._is_toc_chunk(BODY_SECTION_LIST, meta, prev_is_toc=False)
++    assert not cc._is_toc_chunk(BODY_SECTION_LIST, meta, prev_is_toc=True)
++
++
++def test_postprocess_merges_toc_page_continuation_into_one_chunk():
++    chunks = [
++        "Table of contents\n1 General / Application 4 1.1 Other applicable documentation 4 "
++        "1.2 List of abbreviations 5 1.3 Requirements 5 2 Installation 6 2.1 Mounting 7",
++        STIP_TOC_P3,
++        "Systevo Touch IP (STIP)\n[Recovered text] Systevo Touch IP (STIP) 89470J4.GB0 / 10.2021 Table of Contents",
++        "1 General / Application\nThe Honeywell Systevo Touch IP terminal, hereinafter STIP, is a modern "
++        "communication device equipped with a Touch terminal for care facilities.",
++    ]
++    metas = [{"content_type": "toc", "heading_path": "x"}] + [
++        {"content_type": "text", "heading_path": "x", "page_numbers": "3"} for _ in chunks[1:3]
++    ] + [{"content_type": "text", "heading_path": "1 General / Application"}]
++    out, om = cc.postprocess_chunks(chunks, metas)
++    assert [m["content_type"] for m in om] == ["toc", "text"]
++    assert "Systevo Touch IP (STIP)\n" not in out[0].split("\n", 1)[1][:30]   # running header dropped
++    assert "2.5 Installation" in out[0] and "Recovered text" not in out[0]
++
++
++# ------------------------------------------------------------------ cellmarks on Docling-like tables
++class _Cell(SimpleNamespace):
++    pass
++
++
++class _FakeData:
++    """Mimics docling-core TableData: `grid` is rebuilt on every access and every position that has
++    no cell in `table_cells` is a fresh blank placeholder (so writes to it are lost)."""
++
++    def __init__(self, n_rows, n_cols, table_cells):
++        self.num_rows, self.num_cols, self.table_cells = n_rows, n_cols, table_cells
++
++    @property
++    def grid(self):
++        g = [[_Cell(text="", bbox=None, start_row_offset_idx=r, end_row_offset_idx=r + 1,
++                    start_col_offset_idx=c, end_col_offset_idx=c + 1) for c in range(self.num_cols)]
++             for r in range(self.num_rows)]
++        for tc in self.table_cells:
++            for r in range(tc.start_row_offset_idx, tc.end_row_offset_idx):
++                for c in range(tc.start_col_offset_idx, tc.end_col_offset_idx):
++                    g[r][c] = tc
++        return g
++
++
++def _tick_page(n_rows=5, n_cols=4, cw=90.0, rh=30.0):
++    import pymupdf
++    doc = pymupdf.open()
++    page = doc.new_page(width=595, height=842)
++    x0, y0 = 50.0, 100.0
++    for r in range(n_rows + 1):
++        page.draw_line((x0, y0 + r * rh), (x0 + n_cols * cw, y0 + r * rh))
++    for c in range(n_cols + 1):
++        page.draw_line((x0 + c * cw, y0), (x0 + c * cw, y0 + n_rows * rh))
++    pm = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 24, 24))
++    pm.set_rect(pm.irect, (30, 160, 60))
++    ticks = [(1, 2), (2, 2), (3, 3), (4, 1), (4, 3)]
++    for r, c in ticks:
++        cx, cy = x0 + c * cw + cw / 2, y0 + r * rh + rh / 2
++        page.insert_image(pymupdf.Rect(cx - 6, cy - 6, cx + 6, cy + 6), pixmap=pm)
++    return page, (x0, y0, cw, rh), ticks
++
++
++@pytest.mark.parametrize("shrink", [0.0, 6.0, 14.0])
++def test_ticks_survive_inexact_boxes_and_blank_placeholders(shrink):
++    pdf_cellmarks = _load("parsers/pdf_cellmarks.py")
++    page, (x0, y0, cw, rh), ticks = _tick_page()
++    n_rows, n_cols = 5, 4
++    cells = []
++    for r in range(n_rows):
++        for c in range(n_cols):
++            if r == 0 or c == 0:                       # header row / label column have text and boxes
++                cells.append(_Cell(text=f"t{r}{c}",
++                                   bbox=SimpleNamespace(l=x0 + c * cw + shrink, t=y0 + r * rh + shrink,
++                                                        r=x0 + (c + 1) * cw - shrink, b=y0 + (r + 1) * rh - shrink),
++                                   start_row_offset_idx=r, end_row_offset_idx=r + 1,
++                                   start_col_offset_idx=c, end_col_offset_idx=c + 1))
++    # a few EMPTY cells that do exist in table_cells but whose boxes are shifted (TableFormer-like)
++    cells.append(_Cell(text="", bbox=SimpleNamespace(l=x0 + 2 * cw + 20, t=y0 + 1 * rh + 14, r=x0 + 3 * cw, b=y0 + 2 * rh),
++                       start_row_offset_idx=1, end_row_offset_idx=2, start_col_offset_idx=2, end_col_offset_idx=3))
++    item = SimpleNamespace(data=_FakeData(n_rows, n_cols, cells))
++    doc = SimpleNamespace(tables=[item])
++    pdf_cellmarks.inject_marks(doc, page, {"tick": "Yes", "dots": "No"}, repeat_min=3)
++    grid = item.data.grid                              # fresh access, as export_to_markdown does
++    for r, c in ticks:
++        assert grid[r][c].text.startswith("Yes"), f"tick at ({r},{c}) lost (shrink={shrink})"
++    yes = sum(1 for row in grid for cell in row if cell.text.startswith("Yes"))
++    assert yes == len(ticks)
