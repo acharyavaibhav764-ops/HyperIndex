@@ -4,7 +4,9 @@ Quick CLI utility to test parsing and hybrid chunking on any text or Markdown fi
 Usage:
     python test_parse.py path/to/document.txt
     python test_parse.py path/to/document.md
+    PYTHONUTF8=1 python test_parse.py path/to/document.pdf
 """
+import json
 import sys
 from pathlib import Path
 
@@ -62,6 +64,19 @@ def main():
         preview = chunk if len(chunk) <= 800 else chunk[:800] + f"\n... [truncated — full length: {len(chunk)} chars]"
         print(preview)
         print(f"{'='*70}\n")
+
+    # v5.9 WP0: write full JSON dump for automated checks / inspection.
+    json_path = file_path.parent / f"chunks_{file_path.stem}.json"
+    out = [
+        {"chunk_index": i, "text": chunk, "metadata": meta, "id": cid}
+        for i, (chunk, meta, cid) in enumerate(zip(chunks, metadatas, chunk_ids))
+    ]
+    json_path.write_text(
+        json.dumps(out, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"\n[JSON] Written {len(out)} chunks to: {json_path}")
+    print("[Encoding] Check for mojibake: grep -P '[\\u251C\\u252C\\u0393\\u2229\\u00C3\\u00C2]' " + str(json_path))
 
 
 if __name__ == "__main__":

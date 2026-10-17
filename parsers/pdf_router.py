@@ -133,6 +133,9 @@ from .docling_parser import (
     _inject_picture_descriptions,
 )
 from . import pdf_cleanup, pdf_structure  # v5.7
+from . import pdf_cellmarks  # v5.9 WP3
+from . import pdf_coverage   # v5.9 WP4
+from . import pdf_figures    # v5.9 WP5
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +477,20 @@ def _flatten_document(doc: DoclingDocument) -> DoclingDocument:
     return flat
 
 
+_ITALIC_RE = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
+
+
+def _strip_inline_emphasis(md: str) -> str:
+    """v5.9.1: remove **bold** / *italic* markers before the markdown -> DoclingDocument round trip.
+
+    Docling's markdown backend splits or drops inline strong runs (lost: 'No' in '- No presence 2',
+    'SF12', 'be set.'; fragmented: 'without presence 2' / ', for' / '1 bed' on separate lines).
+    Emphasis carries no retrieval value, so it is removed up front. Headings (#) are untouched.
+    """
+    md = md.replace("**", "")
+    return _ITALIC_RE.sub(r"\1", md)
+
+
 class PdfPageRouter(BaseParser):
     """
     v5.1 PDF per-page triage router.
@@ -546,6 +563,17 @@ class PdfPageRouter(BaseParser):
             if settings.pdf_ocr_on_text_pages or len(t.strip()) < settings.pdf_text_layer_min_chars
         }
 
+        # v5.9 WP4: raw text per page for coverage check.
+        page_raw_texts: list[str] = page_texts
+
+        # v5.9 WP3: scan for availability legend once.
+        tick_legend = None
+        if settings.pdf_v59_cellmarks:
+            tick_legend = pdf_cellmarks.scan_legend(page_texts)
+            if tick_legend:
+                logger.info("cellmarks: legend found: %s", tick_legend)
+        self._tick_legend = tick_legend
+
         for page in pdf:
             routes = self._triage_page(page)
             logger.debug("Page %d → routes=%s", page.number, routes)
@@ -576,7 +604,7 @@ class PdfPageRouter(BaseParser):
             page_markdowns.append("\n\n".join(p for p in parts if p))
 
         pdf.close()
-        return self._merge_pages(page_markdowns, filename)
+        return self._merge_pages(page_markdowns, filename, page_raw_texts)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -711,7 +739,38 @@ class PdfPageRouter(BaseParser):
             str: Markdown string for the page's content.
         """
         doc = self._docling_full(file_bytes, filename, use_ocr)
-        return doc.export_to_markdown()
+
+        # v5.9 WP3: inject availability marks before export.
+        if settings.pdf_v59_cellmarks:
+            try:
+                page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
+                tick_legend = getattr(self, "_tick_legend", None)
+                pdf_cellmarks.inject_marks(
+                    doc, page_fitz, tick_legend,
+                    repeat_min=settings.pdf_mark_repeat_min,
+                )
+            except Exception as exc:
+                logger.warning("cellmarks: page %d failed: %s", page_no, exc)
+
+        # v5.9 WP5: build figure cards before export.
+        cards = []
+        if settings.pdf_figure_mode != "off":
+            try:
+                page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
+                heading_path = []  # will be populated by pdf_structure in _merge_pages
+                cards = pdf_figures.process_pictures(
+                    doc, page_fitz, heading_path, page_no,
+                    mode=settings.pdf_figure_mode,
+                )
+            except Exception as exc:
+                logger.warning("pdf_figures: page %d failed: %s", page_no, exc)
+
+        md = doc.export_to_markdown()
+        if cards:
+            card_md = "\n\n".join(c["text"] for c in cards if c.get("text"))
+            if card_md:
+                md = f"{md}\n\n{card_md}"
+        return md
 
     def _smolvlm_page(self, file_bytes: bytes, filename: str, page_no: int, use_ocr: bool = True) -> str:
         """Describe an image-heavy page using SmolVLM via Docling VLM pipeline.
@@ -743,6 +802,19 @@ class PdfPageRouter(BaseParser):
             # tokens (e.g. "<end_of_utteranc") and prefixes descriptions with
             # "[Figure description]" for consistent downstream filtering.
             _inject_picture_descriptions(doc)
+
+            # v5.9 WP3: inject availability marks before export.
+            if settings.pdf_v59_cellmarks:
+                try:
+                    page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
+                    tick_legend = getattr(self, "_tick_legend", None)
+                    pdf_cellmarks.inject_marks(
+                        doc, page_fitz, tick_legend,
+                        repeat_min=settings.pdf_mark_repeat_min,
+                    )
+                except Exception as exc:
+                    logger.warning("cellmarks (smolvlm path): page %d failed: %s", page_no, exc)
+
             return doc.export_to_markdown()
         except Exception as exc:
             logger.warning(
@@ -801,8 +873,16 @@ class PdfPageRouter(BaseParser):
     # Result assembly
     # ------------------------------------------------------------------
 
-    def _merge_pages(self, page_markdowns: list[str], filename: str) -> DoclingDocument:
+    def _merge_pages(
+        self,
+        page_markdowns: list[str],
+        filename: str,
+        page_raw_texts: list[str] | None = None,
+    ) -> DoclingDocument:
         """Combine per-page markdown strings into a single DoclingDocument.
+
+        v5.9 WP4: when page_raw_texts is provided, coverage.check_page()
+        repairs near-matches and appends uncovered text after cleanup.
 
         Each page markdown is converted independently so that a real
         ProvenanceItem (with the correct page_no) can be stamped on every
@@ -819,6 +899,7 @@ class PdfPageRouter(BaseParser):
         Args:
             page_markdowns: List of markdown strings, one per page (1-indexed).
             filename:       Original PDF filename (used to derive MD stream names).
+            page_raw_texts: Optional list of raw PyMuPDF page texts for WP4 coverage.
 
         Returns:
             DoclingDocument: Merged structured document ready for chunking.
@@ -834,7 +915,21 @@ class PdfPageRouter(BaseParser):
                 pdf_cleanup.clean_page_markdown(md, self._vocab) for md in page_markdowns
             ]
 
+        # v5.9 WP4: coverage safety net.
+        if settings.pdf_v59_coverage and page_raw_texts:
+            running_lines: set[str] = set()
+            for i, (md, raw) in enumerate(zip(page_markdowns, page_raw_texts)):
+                try:
+                    page_markdowns[i] = pdf_coverage.check_page(
+                        md, raw, running_lines,
+                        recall_min=settings.pdf_coverage_recall_min,
+                        near_match_ratio=settings.pdf_coverage_near_match,
+                    )
+                except Exception as exc:
+                    logger.warning("coverage: page %d failed: %s", i + 1, exc)
+
         for page_no, md in enumerate(page_markdowns, start=1):  # 1-indexed for humans
+            md = _strip_inline_emphasis(md)  # v5.9.1
             stream = DocumentStream(
                 name=f"page_{page_no}.md",
                 stream=BytesIO(md.encode("utf-8")),

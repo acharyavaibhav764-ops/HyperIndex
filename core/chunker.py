@@ -11,7 +11,45 @@ from docling_core.types.doc import DoclingDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import settings
-from core.chunk_cleanup import is_micro_label, postprocess_chunks  # v5.8
+from core.chunk_cleanup import (  # v5.8 / v5.9.1
+    extract_doc_meta,
+    is_micro_label,
+    postprocess_chunks,
+    section_id,
+)
+
+
+# =========================================================================
+# v5.9 WP0b — metadata helpers
+# =========================================================================
+
+def _flatten_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    """Convert list/None metadata to Chroma-safe scalars (str/int/float/bool)."""
+    out: dict[str, Any] = {}
+    for k, v in meta.items():
+        if k == "page" and v is None:
+            continue                         # omit — Chroma rejects None
+        elif k == "page_numbers" and isinstance(v, (list, tuple)):
+            out[k] = ",".join(str(p) for p in v)
+        elif k == "heading_path" and isinstance(v, (list, tuple)):
+            out[k] = " > ".join(str(h) for h in v if str(h).strip())
+        else:
+            out[k] = v
+    return out
+
+
+def _doc_meta(doc: DoclingDocument) -> dict[str, str]:
+    """v5.9.1 WP6: doc_number / doc_version / doc_date from the first three pages of the document."""
+    empty = {"doc_number": "", "doc_version": "", "doc_date": ""}
+    try:
+        pages: dict[int, list[str]] = {}
+        for it in doc.texts:
+            prov = getattr(it, "prov", None)
+            if prov:
+                pages.setdefault(prov[0].page_no, []).append(it.text or "")
+        return extract_doc_meta(["\n".join(pages[p]) for p in sorted(pages)[:3]])
+    except Exception:
+        return empty
 
 
 class _MarkdownTableChunkSerializer(ChunkingDocSerializer):
@@ -199,6 +237,7 @@ class Chunker:
             repeat_table_header=True,
         )
         raw_chunks = list(chunker.chunk(doc))
+        doc_meta = _doc_meta(doc)  # v5.9.1 WP6
 
         chunks: list[str] = []
         metadatas: list[dict[str, Any]] = []
@@ -240,6 +279,35 @@ class Chunker:
                 )
             )
 
+            # v5.9: surface heading_path from chunk.meta.headings.
+            heading_list: list[str] = []
+            try:
+                heading_list = list(chunk.meta.headings or [])
+            except (AttributeError, TypeError):
+                pass
+
+            # v5.9: derive content_type tag.
+            content_type = "text"
+            if "[TOC]" in text:
+                content_type = "toc"
+            elif "[Recovered text]" in text:
+                content_type = "recovered_text"
+            elif text.startswith("Figure:") or is_picture_chunk:
+                content_type = "figure"
+            else:
+                try:
+                    labels = [
+                        getattr(item, "label", None)
+                        for item in getattr(chunk.meta, "doc_items", [])
+                    ]
+                    from docling_core.types.doc import DocItemLabel as _DIL
+                    if any(l == _DIL.TABLE for l in labels):
+                        content_type = "table"
+                    elif any(l == _DIL.PICTURE for l in labels):
+                        content_type = "figure"
+                except Exception:
+                    pass
+
             meta: dict[str, Any] = {
                 "document_id": file_id,
                 "file_id": file_id,
@@ -247,6 +315,11 @@ class Chunker:
                 "page": page,
                 "page_numbers": pages,
                 "chunk_index": len(metadatas),
+                # v5.9 WP0b
+                "heading_path": heading_list,
+                "content_type": content_type,
+                "section_id": section_id(page, heading_list),
+                **doc_meta,
             }
             if is_picture_chunk:
                 meta["source"] = "image_description"
@@ -288,11 +361,14 @@ class Chunker:
                     "page": page,
                     "page_numbers": [page] if page is not None else [],
                     "chunk_index": len(metadatas),
+                    # v5.9 WP0b
+                    "heading_path": [heading_text],
+                    "content_type": "text",
+                    "section_id": section_id(page, [heading_text]),
+                    **doc_meta,
                 }
                 # v5.5 Fix B: insert at the end of the heading's own page instead
                 # of appending at the tail (the "orphan chunks at end" bug).
-                # Diagnostic B confirmed doc.texts order was correct; the bug was
-                # purely that this loop always called .append() regardless of page.
                 insert_at = len(chunks)
                 if page is not None:
                     for idx, m in enumerate(metadatas):
@@ -305,6 +381,9 @@ class Chunker:
 
         for idx, m in enumerate(metadatas):  # keep chunk_index == list position
             m["chunk_index"] = idx
+
+        # v5.9 WP0b: flatten list/None values to Chroma-safe scalars.
+        metadatas = [_flatten_meta(m) for m in metadatas]
 
         if not chunks:
             raise ValueError(f"File {filename} does not contain extractable text")

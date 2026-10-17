@@ -1,16 +1,7 @@
-"""v5.7 -- text and markdown clean-up for PDF pages (pure functions, no Docling imports).
+"""v5.7+ PDF text/markdown clean-up (pure functions, no Docling imports).
 
-Everything here works on plain strings so it can be unit-tested without a model,
-a converter or a PDF.  ``pdf_router.PdfPageRouter`` calls it at two points:
-
-* per page, on the markdown string, *before* it is turned into a DoclingDocument
-  (``clean_page_markdown``), and
-* per text item, on the merged document (``normalize_text`` via ``pdf_structure``).
-
-The "vocabulary" is a Counter of lowercase words taken from the PDF's own text
-layer.  It lets us repair lost spaces ("basedon" -> "based on") and drop photo-OCR
-noise without shipping a dictionary.  A word is only ever split when every piece is
-a word the document itself uses at least ``_MIN_PART_COUNT`` times.
+Vocabulary-guided space repair, table normalisation, ToC detection (v5.9 WP2).
+Called from pdf_router per page before DoclingDocument conversion.
 """
 from __future__ import annotations
 
@@ -19,6 +10,8 @@ import math
 import re
 from collections import Counter
 from typing import Iterable
+
+from config import settings
 
 _WORD_RE = re.compile(r"[A-Za-z]+")
 _MIN_PART_COUNT = 1     # every piece of a split word must occur in the document
@@ -300,11 +293,7 @@ def _norm_line(line: str) -> str:
 
 
 def strip_running_lines(page_markdowns: list[str], min_share: float = 0.10, min_pages: int = 4) -> list[str]:
-    """Drop lines that repeat on many pages (running headers/footers).
-
-    Digits are normalised so 'Guide 4' and 'Guide 31' count as the same line.  Table
-    rows, headings and lines >= 120 chars are never removed.
-    """
+    """Drop lines that repeat across many pages (running headers/footers)."""
     seen: dict[str, set[int]] = {}
     for i, md in enumerate(page_markdowns):
         for line in md.splitlines():
@@ -429,19 +418,17 @@ def _fix_toc_rows(rows: list[list[str]]) -> list[list[str]]:
 
 
 def clean_markdown_tables(md: str, vocab: Counter | None = None) -> str:
-    """Normalise every pipe table in ``md``.
-
-    * cell text: markup + punctuation spacing;  '...' filler rows dropped
-    * [name|value|name|value] side-by-side layouts split into one table per group
-    * rows that repeat the header's tail ('Round 2 (Static)') start a new table
-    * contents tables get their numerals repaired
-    """
+    """Normalise every pipe table: cell cleanup, side-by-side split, ToC detection."""
     lines = md.split("\n")
     out: list[str] = []
     i = 0
+    last_heading = ""
     while i < len(lines):
-        if not lines[i].lstrip().startswith("|"):
-            out.append(lines[i])
+        line = lines[i]
+        if line.lstrip().startswith("#"):
+            last_heading = line.strip()
+        if not line.lstrip().startswith("|"):
+            out.append(line)
             i += 1
             continue
         j = i
@@ -452,7 +439,7 @@ def clean_markdown_tables(md: str, vocab: Counter | None = None) -> str:
         for sub_no, sub in enumerate(_split_adjacent_tables(block)):
             if sub_no:
                 out.append("")
-            _emit_clean_table(sub, out, vocab)
+            _emit_clean_table(sub, out, vocab, prev_heading=last_heading)
     return "\n".join(out)
 
 
@@ -488,7 +475,39 @@ def _try_toc(rows: list[list[str]]) -> list[list[str]] | None:
     return [[f"{(i + 1) if sequential else p[0]}.", p[1], p[2]] for i, p in enumerate(parsed)]
 
 
-def _emit_clean_table(block: list[str], out: list[str], vocab: Counter | None) -> None:
+_TOC_HEADING_RE = re.compile(
+    r"\b(?:content|contents|table\s+of\s+contents|inhalt)\b", re.I
+)
+_DOT_LEADER_ROW_RE = re.compile(r"\.{4,}\s*\d+")
+
+
+def _is_toc_table(header: list[str], rows: list[list[str]], prev_heading: str) -> bool:
+    """v5.9 WP2: True when the preceding heading or row content signals a ToC table."""
+    if prev_heading and _TOC_HEADING_RE.search(prev_heading):
+        return True
+    if not rows:
+        return False
+    dot_rows = sum(
+        1 for r in rows
+        if any(_DOT_LEADER_ROW_RE.search(c) for c in r)
+    )
+    return dot_rows / len(rows) >= 0.5
+
+
+def _compact_toc_chunk(header: list[str], rows: list[list[str]]) -> str:
+    """v5.9 WP2: Emit a compact [TOC] block with dot leaders stripped."""
+    import re as _re
+    _DOTS = _re.compile(r"\.{3,}")
+    lines = ["[TOC]"]
+    for row in rows:
+        clean = [_DOTS.sub("", c).strip() for c in row]
+        clean = [c for c in clean if c]
+        if clean:
+            lines.append("  " + " | ".join(clean))
+    return "\n".join(lines)
+
+
+def _emit_clean_table(block: list[str], out: list[str], vocab: Counter | None, prev_heading: str = "") -> None:
     """Clean one pipe table (``block``) and append its markdown lines to ``out``."""
     if True:
         raw = [_split_row(ln) for ln in block if not _SEP_ROW_RE.match(ln.strip())]
@@ -502,6 +521,13 @@ def _emit_clean_table(block: list[str], out: list[str], vocab: Counter | None) -
         toc = _try_toc(raw)
         if toc is not None:                           # v5.8: two-column contents table
             header, rows = ["No.", "Section", "Page"], toc
+        elif settings.pdf_v59_toc and _is_toc_table(
+            header, rows,
+            prev_heading=prev_heading or getattr(_emit_clean_table, "_last_heading", ""),
+        ):
+            # v5.9 WP2: dotted-leader ToC detected -- emit compact toc block
+            out.append(_compact_toc_chunk(header, rows))
+            return
         elif width >= 3 and re.match(r"^(\d+|I+|l+)\.?$", header[0]) and header[0]:
             # contents table: no real header row -> treat every row as data
             rows = _fix_toc_rows([header] + rows)
@@ -525,7 +551,13 @@ def clean_page_markdown(md: str, vocab: Counter | None = None) -> str:
     # photo text: keep only when it reads like words (logo text survives, debris goes)
     def _pic(m: re.Match) -> str:
         inner = re.sub(r"<br\s*/?>", " ", m.group(1)).strip()
-        return "\n\n" + inner + "\n\n" if inner and not is_noise_paragraph(inner) else "\n\n"
+        # v5.9 WP4: keep instruction-like captions (numbered, imperative, >6 words)
+        is_instruction = bool(re.match(
+            r"^\d+[.)\s]|^[A-Z][a-z]+ (?:the |a |an )|^Press\b|^Turn\b|^Insert\b|^Remove\b",
+            inner,
+        )) or len(inner.split()) > 6
+        keep = inner and (not is_noise_paragraph(inner) or is_instruction)
+        return "\n\n" + inner + "\n\n" if keep else "\n\n"
     md = _PICTURE_TEXT_RE.sub(_pic, md)
     md = _BOLD_HYPHEN_RE.sub("-", md)
     md = _SUP_TAG_RE.sub("", md)
@@ -537,11 +569,11 @@ def clean_page_markdown(md: str, vocab: Counter | None = None) -> str:
         if not s:
             continue
         first = s.lstrip()
-        if first.startswith(("|", "#")) or first.startswith(("- ", "* ", "> ")) or len(s) >= 80:
+        if first.startswith(("|", "#", "[TOC]")) or first.startswith(("- ", "* ", "> ")) or len(s) >= 80:
             kept.append(p)
         elif not is_noise_paragraph(s):
             kept.append(p)
-    kept = [k if k.lstrip().startswith("|") else _clean_paragraph(k, vocab) for k in kept]
+    kept = [k if (k.lstrip().startswith("|") or k.lstrip().startswith("[TOC]")) else _clean_paragraph(k, vocab) for k in kept]
     return "\n\n".join(kept)
 
 
@@ -569,12 +601,7 @@ def fix_heading_number(text: str) -> str:
 
 
 def repair_heading_sequence(texts: list[str]) -> list[str]:
-    """'6.5 ...', '6.5.1 ...', then '6.2.2 ...' -> '6.5.2 ...'.
-
-    A 3-level number whose chapter matches the last 2-level heading but whose second part is
-    LOWER than it is a typo in the source; it takes the last 2-level prefix.  A higher second
-    part (a missing parent heading) is left alone.
-    """
+    """Fix 3-level heading number typos where sub-number is lower than parent."""
     out: list[str] = []
     last2: list[str] | None = None
     for t in texts:

@@ -42,6 +42,21 @@ _LEAD_JUNK_RE = re.compile(r"^[a-z]{1,2}\s+(?=[A-Z])")
 _SMALL_WORDS = {"a", "an", "the", "of", "in", "on", "to", "for", "and", "or", "at", "by", "with"}
 _DAY_RE = re.compile(r"^(Day|Week|Round|Step)\s+(\d+)$")
 
+# v5.9 WP6: template heading blacklist
+_HEADING_BLACKLIST = {
+    "titelseite", "gb version",
+    "(text wird aus lv texte ...)",
+}
+_HEADING_BLACKLIST_RE = re.compile(
+    r"^(?:Fig\.|Abb\.)\s*\d+|^\(TEXT wird aus LV Texte", re.I
+)
+_PROFILE_RE = re.compile(r"^Profile\s+\d+$", re.I)
+_FEATURES_RE = re.compile(r"^(?:Features|Functions):\s*$", re.I)
+_NUMBERED_OVERRIDE_RE = re.compile(r"^\d+(\.\d+){1,3}\s+\S")  # e.g. 4.5.5
+_DOC_NUMBER_RE = re.compile(r"\b(\d{5,}[A-Z]\d*\.\w+)\b")
+_DOC_VERSION_RE = re.compile(r"\bV(\d+(?:\.\d+)?)\b")
+_DOC_DATE_RE = re.compile(r"\b(\d{1,2}\.\d{4})\b")
+
 
 # ----------------------------------------------------------------------------
 # tree helpers
@@ -333,6 +348,43 @@ def repair_heading_numbers(doc: DoclingDocument) -> None:
             h.orig = t
 
 
+def blacklist_headings(doc: DoclingDocument) -> None:
+    """v5.9 WP6: Blank template headings that should not appear in chunks.
+
+    Converts Titelseite, GB Version, Fig.xy, Abb.xy items to empty text so
+    HierarchicalChunker skips them.  Also detects Profile N lines and ensures
+    they are labelled as SECTION_HEADER.
+    """
+    for item in _sequence(doc):
+        if not _is_heading(item):
+            continue
+        text = (item.text or "").strip()
+        if not text:
+            continue
+        if text.lower() in _HEADING_BLACKLIST or _HEADING_BLACKLIST_RE.match(text):
+            logger.debug("WP6: blacklisting heading %r", text)
+            item.text = ""
+            continue
+        # Profile N -> ensure SECTION_HEADER label
+        if _PROFILE_RE.match(text):
+            item.label = DocItemLabel.SECTION_HEADER
+        # Numbering regex override: if text starts with N.N.N pattern, enforce level
+        if _NUMBERED_OVERRIDE_RE.match(text) and hasattr(item, 'level'):
+            depth = text.split()[0].count('.')
+            item.level = min(depth + 1, 6)
+
+
+def extract_doc_metadata(page_texts: list[str]) -> dict:
+    """v5.9 WP6: Extract document number, version, and date from the first pages.
+
+    Scans the first 3 pages for patterns like 89470K2.GB0, V2, 11.2020.
+    Returns a dict with doc_number, doc_version, doc_date (empty strings if not found).
+    """
+    from core.chunk_cleanup import extract_doc_meta  # v5.9.1: fixed regexes live there
+
+    return extract_doc_meta(page_texts)
+
+
 def repair_pdf_structure(doc: DoclingDocument, vocab: Counter | None = None) -> None:
     """Run every v5.7 document-level pass in dependency order."""
     clean_text_items(doc, vocab)
@@ -341,3 +393,4 @@ def repair_pdf_structure(doc: DoclingDocument, vocab: Counter | None = None) -> 
     bind_captions(doc)
     relevel_headings(doc)
     dedupe_echoes(doc)
+    blacklist_headings(doc)  # v5.9 WP6

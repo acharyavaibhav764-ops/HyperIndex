@@ -1,0 +1,1467 @@
+# v5.9.patch  -  generated sequentially
+
+
+# ======================================================
+# Phase 0: config, chunk_cleanup, chunker, retriever (already applied to codebase)
+# ======================================================
+
+diff --git a/config.py b/config.py
+index 720c444..9709309 100644
+--- a/config.py
++++ b/config.py
+@@ -85,7 +85,32 @@ class Settings:
+     # to collect the diagnostic output.  Never enable in production.
+     pdf_debug_heading_dump: bool = bool(int(os.getenv("PDF_DEBUG_HEADING_DUMP", "0")))
+ 
++    # ---------------------------------------------------------------------------
++    # Parsing Architecture v5.9 — kill-switches (all default on)
++    # ---------------------------------------------------------------------------
++    # WP1: custom grid-based table serializer + junk-chunk filter.
++    chunk_v59_tables: bool = os.getenv("CHUNK_V59_TABLES", "true").lower() == "true"
++    # WP2: ToC detection and content_type=toc retriever filter.
++    pdf_v59_toc: bool = os.getenv("PDF_V59_TOC", "true").lower() == "true"
++    # WP3: availability-mark injection from pdf_cellmarks.py.
++    pdf_v59_cellmarks: bool = os.getenv("PDF_V59_CELLMARKS", "true").lower() == "true"
++    # WP4: text-coverage safety net (pdf_coverage.py).
++    pdf_v59_coverage: bool = os.getenv("PDF_V59_COVERAGE", "true").lower() == "true"
++    # WP5: figure pipeline mode.  off=disabled, labels_only=deterministic card (v5.9 default),
++    #       vlm_fallback=VLM for hard figures (v5.10).
++    pdf_figure_mode: str = os.getenv("PDF_FIGURE_MODE", "labels_only")
++    # WP7: cross-check Docling table grid against PyMuPDF find_tables().
++    pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"
+ 
++    # v5.9 thresholds
++    # WP4: per-page recall floor below which a warning is logged.
++    pdf_coverage_recall_min: float = float(os.getenv("PDF_COVERAGE_RECALL_MIN", "0.9"))
++    # WP4: difflib SequenceMatcher ratio threshold for near-match repair.
++    pdf_coverage_near_match: float = float(os.getenv("PDF_COVERAGE_NEAR_MATCH", "0.75"))
++    # WP1: max tokens allowed in repeated table-header prefix.
++    chunk_header_cap_tokens: int = int(os.getenv("CHUNK_HEADER_CAP_TOKENS", "64"))
++    # WP3: minimum number of identical image hashes in a table to treat as availability mark.
++    pdf_mark_repeat_min: int = int(os.getenv("PDF_MARK_REPEAT_MIN", "3"))
+ 
+ 
+ settings = Settings()
+diff --git a/core/chunk_cleanup.py b/core/chunk_cleanup.py
+index a682f59..9635524 100644
+--- a/core/chunk_cleanup.py
++++ b/core/chunk_cleanup.py
+@@ -1,9 +1,14 @@
+-"""v5.8 chunk-level sanitiser. Pure Python - no Docling imports, so it is unit-testable anywhere.
++"""v5.9 chunk-level sanitiser (extends v5.8). Pure Python - no Docling imports.
+ 
+-HybridChunker re-serialises Docling items as markdown: an item carrying ``formatting`` comes out as
+-``**text**`` and a stray ``###`` token survives as text.  This pass runs on the final chunk strings
+-and removes that markup, drops a trailing line that is really the NEXT chunk's heading, and drops
+-chunks that have become heading-only or are a stray one-line logo.
++v5.8 additions carried forward:
++- strip_markup: remove leaked '###', '**bold**', '*italic*'.
++- postprocess_chunks: drop echo-only / micro chunks.
++
++v5.9 additions (WP1):
++- _collapse_sep_rows: replace wide markdown separator rows with compact |---|---|.
++- _strip_dot_runs: remove dot-leader sequences of 4+ dots.
++- postprocess_chunks: merge heading-only chunks into the next chunk instead of
++  dropping them (heading text remains retrievable); drop separator-only junk.
+ """
+ from __future__ import annotations
+ 
+@@ -12,7 +17,10 @@ from typing import Any
+ 
+ _ATX = re.compile(r"(?m)(?:^|(?<=[ \t]))(?:#{2,6}|#(?=[ \t]*\*\*))[ \t]*")
+ _ITALIC = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
+-_INNER_SPACES = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)")      # also collapses markdown-table padding
++_INNER_SPACES = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)")
++_SEP_ROW_RE = re.compile(r"^\|(\s*:?-{2,}:?\s*\|)+\s*$")   # v5.9 WP1
++_DOT_RUN_RE = re.compile(r"\.{4,}")                          # v5.9 WP1
++_JUNK_CHUNK_RE = re.compile(r"^[\s|:\-.]*$")                  # v5.9 WP1
+ 
+ 
+ def strip_markup(text: str) -> str:
+@@ -23,6 +31,28 @@ def strip_markup(text: str) -> str:
+     return _INNER_SPACES.sub(" ", text)
+ 
+ 
++def _collapse_sep_rows(text: str) -> str:
++    """v5.9 WP1: Replace wide markdown separator rows with compact |---|---|.
++
++    MarkdownTableSerializer pads the separator to the widest cell width,
++    inflating the repeated-header prefix past the 256-token chunk limit.
++    """
++    lines = text.split("\n")
++    out = []
++    for line in lines:
++        stripped = line.strip()
++        if _SEP_ROW_RE.match(stripped):
++            cols = max(stripped.count("|") - 1, 1)
++            line = "|" + "---|" * cols
++        out.append(line)
++    return "\n".join(out)
++
++
++def _strip_dot_runs(text: str) -> str:
++    """v5.9 WP1: Replace dot-leader sequences of 4+ dots with '...'."""
++    return _DOT_RUN_RE.sub("...", text)
++
++
+ def _norm(s: str) -> str:
+     return re.sub(r"\s+", " ", strip_markup(s)).strip().casefold()
+ 
+@@ -36,22 +66,68 @@ def is_micro_label(text: str) -> bool:
+ def postprocess_chunks(
+     chunks: list[str], metas: list[dict[str, Any]], *, drop_micro: bool = False
+ ) -> tuple[list[str], list[dict[str, Any]]]:
+-    """Clean chunk strings; drop echo-only / micro chunks.  ``chunk_index`` is NOT renumbered here."""
+-    lines = [strip_markup(c).strip().split("\n") for c in chunks]
++    """v5.9 WP1: Clean chunk strings; handle echo/micro/junk/heading-only chunks.
++
++    Changes vs v5.8:
++    - Apply _collapse_sep_rows and _strip_dot_runs to every chunk.
++    - Drop chunks matching separator-only junk pattern.
++    - Merge heading-only chunks into the NEXT chunk (v5.8 dropped them).
++
++    ``chunk_index`` is NOT renumbered here.
++    """
++    # Phase 1: apply text-level fixes
++    cleaned: list[str] = []
++    for c in chunks:
++        c = strip_markup(c).strip()
++        c = _collapse_sep_rows(c)
++        c = _strip_dot_runs(c)
++        cleaned.append(c)
++
++    lines_list = [c.split("\n") for c in cleaned]
++
++    # Phase 2: merge/drop logic
++    pending_heading: str = ""
+     out_chunks: list[str] = []
+     out_metas: list[dict[str, Any]] = []
+-    for i, ls in enumerate(lines):
+-        nxt = {_norm(x) for x in lines[i + 1][:3]} if i + 1 < len(lines) else set()
++
++    for i, ls in enumerate(lines_list):
++        nxt = {_norm(x) for x in lines_list[i + 1][:3]} if i + 1 < len(lines_list) else set()
++
++        # Drop trailing line that is really the NEXT chunk's heading (v5.8)
+         if len(ls) > 1 and nxt:
+             last = ls[-1].strip()
+             if last and len(last) <= 120 and not last.startswith("|") and _norm(last) in nxt:
+-                ls = ls[:-1]                       # '... ### **3.2 Basics**' glued to previous chunk
+-        norms = {_norm(x) for x in ls if x.strip()}
+-        if nxt and norms and norms <= nxt:         # only headings left, and the next chunk has them
+-            continue
++                ls = ls[:-1]
++
+         text = "\n".join(ls).strip()
++
++        # Drop separator-only junk (v5.9 WP1)
++        if _JUNK_CHUNK_RE.match(text):
++            continue
++
++        # Drop micro labels (v5.8)
+         if drop_micro and is_micro_label(text):
+-            continue                               # e.g. a lone running logo 'Calisthenics Family'
++            continue
++
++        norms = {_norm(x) for x in ls if x.strip()}
++
++        # Heading-only: merge into next instead of dropping (v5.9 WP1)
++        if nxt and norms and norms <= nxt:
++            pending_heading = text if not pending_heading else pending_heading + "\n" + text
++            continue
++
++        if pending_heading:
++            text = pending_heading + "\n" + text
++            pending_heading = ""
++
+         out_chunks.append(text)
+         out_metas.append(metas[i])
++
++    # Emit orphaned heading-only tail chunk
++    if pending_heading:
++        out_chunks.append(pending_heading)
++        if metas:
++            out_metas.append(metas[-1])
++
+     return out_chunks, out_metas
++
+diff --git a/core/chunker.py b/core/chunker.py
+index bfdaa94..06aeafe 100644
+--- a/core/chunker.py
++++ b/core/chunker.py
+@@ -14,6 +14,32 @@ from config import settings
+ from core.chunk_cleanup import is_micro_label, postprocess_chunks  # v5.8
+ 
+ 
++# ---------------------------------------------------------------------------
++# v5.9 WP0b — metadata helpers
++# ---------------------------------------------------------------------------
++
++def _flatten_meta(meta: dict[str, Any]) -> dict[str, Any]:
++    """Convert list/None metadata values to Chroma-safe scalars.
++
++    chromadb==0.5.15 only accepts str/int/float/bool metadata values.
++    - ``page_numbers: list[int]`` -> comma-joined str ("" when empty).
++    - ``heading_path: list[str]`` -> " > " joined str ("" when empty).
++    - ``page: None`` -> key omitted.
++    All other values are passed through unchanged.
++    """
++    out: dict[str, Any] = {}
++    for k, v in meta.items():
++        if k == "page" and v is None:
++            continue                         # omit — Chroma rejects None
++        elif k == "page_numbers" and isinstance(v, (list, tuple)):
++            out[k] = ",".join(str(p) for p in v)
++        elif k == "heading_path" and isinstance(v, (list, tuple)):
++            out[k] = " > ".join(str(h) for h in v)
++        else:
++            out[k] = v
++    return out
++
++
+ class _MarkdownTableChunkSerializer(ChunkingDocSerializer):
+     """v5.7: serialise tables as markdown (header + rows) instead of 'row, col = value'.
+ 
+@@ -240,6 +266,31 @@ class Chunker:
+                 )
+             )
+ 
++            # v5.9 WP0b: surface heading_path from HybridChunker's heading context.
++            # chunk.meta.headings is a list[str] in docling HybridChunker output.
++            heading_list: list[str] = []
++            try:
++                heading_list = list(chunk.meta.headings or [])
++            except (AttributeError, TypeError):
++                pass
++
++            # v5.9 WP0b: derive content_type from chunk labels.
++            content_type = "text"
++            try:
++                labels = [
++                    getattr(item, "label", None)
++                    for item in getattr(chunk.meta, "doc_items", [])
++                ]
++                from docling_core.types.doc import DocItemLabel as _DIL
++                if any(l == _DIL.TABLE for l in labels):
++                    content_type = "table"
++                elif any(l == _DIL.PICTURE for l in labels) or is_picture_chunk:
++                    content_type = "figure"
++            except Exception:
++                pass
++            if is_picture_chunk and content_type == "text":
++                content_type = "figure"
++
+             meta: dict[str, Any] = {
+                 "document_id": file_id,
+                 "file_id": file_id,
+@@ -247,6 +298,10 @@ class Chunker:
+                 "page": page,
+                 "page_numbers": pages,
+                 "chunk_index": len(metadatas),
++                # v5.9 WP0b
++                "heading_path": heading_list,
++                "content_type": content_type,
++                "section_id": f"p{page}" if page is not None else "",
+             }
+             if is_picture_chunk:
+                 meta["source"] = "image_description"
+@@ -288,11 +343,13 @@ class Chunker:
+                     "page": page,
+                     "page_numbers": [page] if page is not None else [],
+                     "chunk_index": len(metadatas),
++                    # v5.9 WP0b
++                    "heading_path": [heading_text],
++                    "content_type": "text",
++                    "section_id": f"p{page}" if page is not None else "",
+                 }
+                 # v5.5 Fix B: insert at the end of the heading's own page instead
+                 # of appending at the tail (the "orphan chunks at end" bug).
+-                # Diagnostic B confirmed doc.texts order was correct; the bug was
+-                # purely that this loop always called .append() regardless of page.
+                 insert_at = len(chunks)
+                 if page is not None:
+                     for idx, m in enumerate(metadatas):
+@@ -306,6 +363,9 @@ class Chunker:
+         for idx, m in enumerate(metadatas):  # keep chunk_index == list position
+             m["chunk_index"] = idx
+ 
++        # v5.9 WP0b: flatten list/None values to Chroma-safe scalars.
++        metadatas = [_flatten_meta(m) for m in metadatas]
++
+         if not chunks:
+             raise ValueError(f"File {filename} does not contain extractable text")
+ 
+diff --git a/core/retriever.py b/core/retriever.py
+index 4d1023e..f3ac47d 100644
+--- a/core/retriever.py
++++ b/core/retriever.py
+@@ -67,11 +67,22 @@ class Retriever:
+             embeddings=embeddings,
+         )
+ 
+-    def retrieve(self, query: str, k: int = 5) -> dict[str, Any]:
+-        """Query ChromaDB for the top-k most semantically similar chunks."""
++    def retrieve(self, query: str, k: int = 5, *, include_toc: bool = False) -> dict[str, Any]:
++        """Query ChromaDB for the top-k most semantically similar chunks.
++
++        Args:
++            query:       The query string.
++            k:           Number of results to return.
++            include_toc: When False (default), excludes chunks with
++                         ``content_type=toc`` from results (v5.9 WP2).
++        """
++        where: dict | None = None
++        if not include_toc:
++            where = {"content_type": {"$ne": "toc"}}
+ 
+         return self.collection.query(
+             query_texts=[query],
+             n_results=k,
+             include=["documents", "metadatas", "distances"],
++            where=where,
+         )
+
+# ======================================================
+# Phase 1: parsers/pdf_cellmarks.py  (WP3 - new file)
+# ======================================================
+
+diff -ruN a/parsers/pdf_cellmarks.py b/parsers/pdf_cellmarks.py
+--- a/parsers/pdf_cellmarks.py	1970-01-01 00:00:00.000000000 +0000
++++ b/parsers/pdf_cellmarks.py	2026-10-13 00:00:00.000000000 +0000
+@@ -0,0 +1,239 @@
++"""v5.9 WP3: Availability-mark injection for PDF table cells.
++
++Detects tiny raster tick-mark images inside table cells and converts them
++to textual availability indicators (Yes / No) before the Docling document
++is serialised to markdown.
++
++Entry point
++    inject_marks(doc, page_fitz, legend, repeat_min=3)
++Called from
++    parsers/pdf_router.py inside _docling_page() and _smolvlm_page()
++    -- between _docling_full(...) and doc.export_to_markdown().
++
++Legend scan
++    scan_legend(page_texts) -> dict | None
++Called once in parse() before the per-page loop.
++
++Coordinate origin
++    Docling : may use bottom-left (PDF native), t > b when in that mode.
++    PyMuPDF : top-left, y increases downward.
++    Conversion: if cell_bbox.t > cell_bbox.b -> flip using page_height.
++"""
++from __future__ import annotations
++
++import hashlib
++import logging
++import re
++from typing import TYPE_CHECKING
++
++if TYPE_CHECKING:
++    from docling_core.types.doc import DoclingDocument
++
++logger = logging.getLogger(__name__)
++
++_MAX_MARK_AREA_PT2 = 400.0
++_ASPECT_MIN = 0.70
++_ASPECT_MAX = 1.40
++_LEGEND_RE = re.compile(r"=\s*(available|unavailable)", re.I)
++
++
++def scan_legend(page_texts: list[str]) -> dict | None:
++    """Scan all page text strings for a tick/dot availability legend.
++
++    Returns {"tick": "Yes", "dots": "No"} when found, else None.
++    """
++    combined = " ".join(page_texts)
++    if _LEGEND_RE.search(combined):
++        return {"tick": "Yes", "dots": "No"}
++    return None
++
++
++def _bbox_to_tuple(bbox) -> tuple:
++    return float(bbox.l), float(bbox.t), float(bbox.r), float(bbox.b)
++
++
++def _flip_if_needed(l, t, r, b, page_height: float) -> tuple:
++    if t > b:
++        t, b = page_height - b, page_height - t
++    return l, t, r, b
++
++
++def _inside(ix0, iy0, ix1, iy1, ox0, oy0, ox1, oy1, tol: float = 2.0) -> bool:
++    return (ix0 >= ox0 - tol and iy0 >= oy0 - tol
++            and ix1 <= ox1 + tol and iy1 <= oy1 + tol)
++
++
++def _image_hash(page, xref: int) -> str:
++    try:
++        data = page.parent.extract_image(xref)["image"]
++        return hashlib.md5(data).hexdigest()
++    except Exception:
++        return ""
++
++
++def _is_greenish(page, x0, y0, x1, y1) -> bool:
++    try:
++        import fitz
++        clip = fitz.Rect(x0, y0, x1, y1)
++        pm = page.get_pixmap(clip=clip, colorspace=fitz.csRGB, alpha=False)
++        s = pm.samples
++        if not s:
++            return True
++        r_s = sum(s[i]     for i in range(0, len(s), 3))
++        g_s = sum(s[i + 1] for i in range(0, len(s), 3))
++        b_s = sum(s[i + 2] for i in range(0, len(s), 3))
++        return g_s > r_s and g_s > b_s
++    except Exception:
++        return True
++
++
++def _ocr_cell(page, x0, y0, x1, y1) -> str:
++    try:
++        import fitz
++        clip = fitz.Rect(x0, y0, x1, y1)
++        words = page.get_text("words", clip=clip)
++        if words:
++            return " ".join(w[4] for w in words).strip()
++    except Exception:
++        pass
++    return ""
++
++
++def inject_marks(
++    doc: "DoclingDocument",
++    page_fitz,
++    legend: dict | None,
++    repeat_min: int = 3,
++) -> None:
++    """Inject availability-mark text into TableCell.text fields in-place.
++
++    Must be called BEFORE doc.export_to_markdown() while cell bboxes exist.
++    Note: WP0 grid-caching test determines whether mutation is effective.
++    If the grid is cached, this no-ops gracefully and logs a warning.
++    """
++    if not doc.tables:
++        return
++
++    page_height = float(page_fitz.rect.height)
++
++    try:
++        all_images = page_fitz.get_image_info(xrefs=True)
++    except Exception:
++        all_images = []
++
++    for table_item in doc.tables:
++        try:
++            _process_table(table_item, all_images, page_fitz,
++                           page_height, legend, repeat_min)
++        except Exception as exc:
++            logger.warning("cellmarks: table processing failed: %s", exc)
++
++
++def _process_table(table_item, all_images, page_fitz, page_height, legend, repeat_min):
++    grid = table_item.data.grid
++    if not grid:
++        return
++
++    cells = []
++    for row in grid:
++        for cell in row:
++            raw = getattr(cell, "bbox", None)
++            if raw is None:
++                continue
++            try:
++                l, t, r, b = _bbox_to_tuple(raw)
++                l, t, r, b = _flip_if_needed(l, t, r, b, page_height)
++                cells.append((cell, (l, t, r, b)))
++            except Exception:
++                continue
++
++    if not cells:
++        return
++
++    candidates = []
++    for img in all_images:
++        ib = img.get("bbox") or img.get("rect")
++        if ib is None:
++            continue
++        ix0, iy0, ix1, iy1 = float(ib[0]), float(ib[1]), float(ib[2]), float(ib[3])
++        w, h = ix1 - ix0, iy1 - iy0
++        if w <= 0 or h <= 0 or w * h > _MAX_MARK_AREA_PT2:
++            continue
++        asp = w / h
++        if not (_ASPECT_MIN <= asp <= _ASPECT_MAX):
++            continue
++        in_cell = any(_inside(ix0, iy0, ix1, iy1, *pm) for _, pm in cells)
++        if not in_cell:
++            continue
++        xref = img.get("xref", 0)
++        candidates.append({"bbox": (ix0, iy0, ix1, iy1), "xref": xref})
++
++    if not candidates:
++        for cell, _ in cells:
++            _apply_dots(cell, legend)
++        return
++
++    hash_count: dict[str, int] = {}
++    for cand in candidates:
++        h = _image_hash(page_fitz, cand["xref"])
++        if h:
++            hash_count[h] = hash_count.get(h, 0) + 1
++
++    mark_hashes = {h for h, c in hash_count.items() if c >= repeat_min}
++
++    col_img_count: dict[int, int] = {}
++    col_total: dict[int, int] = {}
++    for row_i, row in enumerate(grid):
++        for col_i, cell in enumerate(row):
++            if row_i == 0:
++                continue
++            col_total[col_i] = col_total.get(col_i, 0) + 1
++
++    for cell, (cx0, cy0, cx1, cy1) in cells:
++        col_i = getattr(cell, "start_col_offset_idx", -1)
++        mark_found = False
++
++        for cand in candidates:
++            ix0, iy0, ix1, iy1 = cand["bbox"]
++            if not _inside(ix0, iy0, ix1, iy1, cx0, cy0, cx1, cy1):
++                continue
++            h = _image_hash(page_fitz, cand["xref"])
++            if h not in mark_hashes:
++                col_img_count[col_i] = col_img_count.get(col_i, 0) + 1
++                continue
++            if not _is_greenish(page_fitz, ix0, iy0, ix1, iy1):
++                continue
++            mark_found = True
++            break
++
++        if mark_found:
++            old = (cell.text or "").strip()
++            if not old or old in ("...", "..."):
++                cell.text = "Yes"
++            else:
++                cell.text = f"Yes ({old})"
++        else:
++            _apply_dots(cell, legend)
++            if not (cell.text or "").strip():
++                ocr = _ocr_cell(page_fitz, cx0, cy0, cx1, cy1)
++                if ocr:
++                    cell.text = ocr
++
++    header_row = grid[0] if grid else []
++    for col_i, img_c in col_img_count.items():
++        total = col_total.get(col_i, 1)
++        if total > 0 and img_c / total >= 0.8:
++            col_name = "Figure"
++            if col_i < len(header_row):
++                col_name = (header_row[col_i].text or "Figure").strip()
++            logger.info("cellmarks: thumbnail column %r (col %d) cleared", col_name, col_i)
++            for row in grid:
++                if col_i < len(row):
++                    row[col_i].text = f"[{col_name}: product picture]"
++
++
++def _apply_dots(cell, legend):
++    text = (cell.text or "").strip()
++    if text in ("...", "…", "⋯") and legend and legend.get("dots") == "No":
++        cell.text = "No"
++
+
+# ======================================================
+# Phase 2: parsers/pdf_coverage.py  (WP4 - new file)
+# ======================================================
+
+diff -ruN a/parsers/pdf_coverage.py b/parsers/pdf_coverage.py
+--- a/parsers/pdf_coverage.py	1970-01-01 00:00:00.000000000 +0000
++++ b/parsers/pdf_coverage.py	2026-10-13 00:00:00.000000000 +0000
+@@ -0,0 +1,129 @@
++"""v5.9 WP4: Page text-coverage safety net.
++
++Compares each page's PyMuPDF text layer against the cleaned markdown.
++
++Entry point
++    check_page(page_md, raw_text, running_lines, toc_page, ...) -> str
++Called from
++    parsers/pdf_router.py inside _merge_pages(), per page, after clean_page_markdown.
++
++Exclusions (never re-added)
++    - Lines in running_lines (boilerplate from strip_running_lines).
++    - Lines where is_noise_paragraph() is True.
++    - If toc_page=True: skip entire page.
++    - Lines matching figure-label pattern.
++"""
++from __future__ import annotations
++
++import logging
++import re
++from difflib import SequenceMatcher
++
++logger = logging.getLogger(__name__)
++
++_NORM_RE = re.compile(r"[\s\W]+")
++_FIGURE_LABEL_RE = re.compile(r"^(?:[A-Z]{1,6}\s*\d*|Fig\.?\s*\d+|Figure\s*\d+)$", re.I)
++_INSTRUCTION_RE = re.compile(r"^\d+[\.)\s]|^[A-Z][a-z]+ the |^Press\b|^Turn\b|^Insert\b|^Remove\b", re.I)
++
++
++def _norm(text: str) -> str:
++    return _NORM_RE.sub(" ", text.lower()).strip()
++
++
++def _is_figure_label(line: str) -> bool:
++    return bool(_FIGURE_LABEL_RE.match(line.strip())) and len(line.strip()) < 40
++
++
++def check_page(
++    page_md: str,
++    raw_text: str,
++    running_lines: set[str],
++    *,
++    toc_page: bool = False,
++    recall_min: float = 0.9,
++    near_match_ratio: float = 0.75,
++) -> str:
++    """Check coverage and repair/append uncovered text for one page.
++
++    Args:
++        page_md:          Cleaned markdown for this page.
++        raw_text:         Raw PyMuPDF text (page.get_text()).
++        running_lines:    Boilerplate strings from strip_running_lines.
++        toc_page:         If True, skip this page entirely.
++        recall_min:       Warn when recall drops below this.
++        near_match_ratio: difflib ratio threshold for in-place repair.
++
++    Returns:
++        Modified page_md with near-match repairs and optional recovered-text block.
++    """
++    if toc_page or not raw_text.strip():
++        return page_md
++
++    raw_lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
++    if not raw_lines:
++        return page_md
++
++    md_norm = _norm(page_md)
++    norm_running = {_norm(r) for r in running_lines}
++    covered: list[bool] = []
++    uncovered: list[str] = []
++    repaired = page_md
++
++    for raw_line in raw_lines:
++        n_raw = _norm(raw_line)
++        if not n_raw or n_raw in norm_running or _is_figure_label(raw_line):
++            covered.append(True)
++            continue
++        try:
++            from parsers.pdf_cleanup import is_noise_paragraph
++            if is_noise_paragraph(raw_line):
++                covered.append(True)
++                continue
++        except ImportError:
++            pass
++
++        if n_raw in md_norm:
++            covered.append(True)
++            continue
++
++        ratio = SequenceMatcher(None, n_raw, md_norm, autojunk=False).ratio()
++        if ratio >= near_match_ratio:
++            repaired = _repair_in_place(repaired, raw_line, near_match_ratio)
++            covered.append(True)
++            continue
++
++        covered.append(False)
++        uncovered.append(raw_line)
++
++    total = len(covered)
++    n_cov = sum(covered)
++    recall = n_cov / total if total else 1.0
++
++    if recall < recall_min:
++        logger.warning(
++            "coverage: recall=%.2f < %.2f -- %d/%d lines uncovered",
++            recall, recall_min, total - n_cov, total,
++        )
++
++    if uncovered:
++        repaired = repaired.rstrip() + "\n\n[Recovered text]\n" + "\n".join(uncovered)
++
++    return repaired
++
++
++def _repair_in_place(md: str, raw_line: str, ratio_threshold: float) -> str:
++    n_raw = _norm(raw_line)
++    lines = md.split("\n")
++    best_idx, best_ratio = -1, ratio_threshold - 0.01
++    for i, line in enumerate(lines):
++        n_line = _norm(line)
++        if not n_line:
++            continue
++        r = SequenceMatcher(None, n_raw, n_line, autojunk=False).ratio()
++        if r > best_ratio:
++            best_ratio, best_idx = r, i
++    if best_idx >= 0:
++        lines[best_idx] = raw_line
++        return "\n".join(lines)
++    return md
++
+
+# ======================================================
+# Phase 3: parsers/pdf_figures.py  (WP5 deterministic - new file)
+# ======================================================
+
+diff -ruN a/parsers/pdf_figures.py b/parsers/pdf_figures.py
+--- a/parsers/pdf_figures.py	1970-01-01 00:00:00.000000000 +0000
++++ b/parsers/pdf_figures.py	2026-10-13 00:00:00.000000000 +0000
+@@ -0,0 +1,193 @@
++"""v5.9 WP5: Deterministic figure pipeline (labels_only mode).
++
++Builds a figure card for each PictureItem without calling any VLM.
++VLM fallback is wired in v5.10 (PDF_FIGURE_MODE=vlm_fallback).
++
++Entry point
++    process_pictures(doc, page_fitz, heading_path, page_no, mode) -> list[dict]
++Called from
++    parsers/pdf_router.py inside _docling_page() after cellmarks.
++
++Returns a list of dicts:
++    {"figure_id": str, "text": str, "content_type": "figure",
++     "class_hint": str, "confidence": "high"}
++"""
++from __future__ import annotations
++
++import logging
++import re
++import zlib
++from typing import TYPE_CHECKING
++
++if TYPE_CHECKING:
++    from docling_core.types.doc import DoclingDocument
++
++logger = logging.getLogger(__name__)
++
++_GENERIC_RE = re.compile(r"^In this (image|picture|diagram|figure)\b", re.I)
++_ZLIB_RATIO_MIN = 0.35
++_NGRAM_REPEATS = 3
++
++
++def _zlib_ratio(text: str) -> float:
++    raw = text.encode("utf-8")
++    return len(zlib.compress(raw)) / len(raw) if raw else 1.0
++
++
++def _has_repeated_ngram(text: str, n: int = 4) -> bool:
++    words = text.split()
++    if len(words) < n:
++        return False
++    grams: dict[tuple, int] = {}
++    for i in range(len(words) - n + 1):
++        g = tuple(words[i:i + n])
++        grams[g] = grams.get(g, 0) + 1
++    return any(c >= _NGRAM_REPEATS for c in grams.values())
++
++
++def _dedup(labels: list[str]) -> list[str]:
++    seen: set[str] = set()
++    out = []
++    for l in labels:
++        k = l.strip().lower()
++        if k and k not in seen:
++            seen.add(k)
++            out.append(l.strip())
++    return out
++
++
++def _extract_numbers(labels: list[str]) -> list[str]:
++    nums = []
++    for l in labels:
++        nums.extend(re.findall(r"\b\d+(?:\.\d+)?\b", l))
++    return list(dict.fromkeys(nums))
++
++
++def _inside_table(bbox, table_bboxes) -> bool:
++    px0, py0, px1, py1 = bbox
++    for tx0, ty0, tx1, ty1 in table_bboxes:
++        if px0 >= tx0 - 2 and py0 >= ty0 - 2 and px1 <= tx1 + 2 and py1 <= ty1 + 2:
++            return True
++    return False
++
++
++def process_pictures(
++    doc: "DoclingDocument",
++    page_fitz,
++    heading_path: list[str],
++    page_no: int,
++    mode: str = "labels_only",
++    hash_cache: dict | None = None,
++) -> list[dict]:
++    """Build deterministic figure cards for all non-skipped PictureItems."""
++    if mode == "off" or not doc.pictures:
++        return []
++
++    hash_cache = hash_cache or {}
++    table_bboxes = []
++    for tbl in doc.tables:
++        tb = getattr(tbl, "bbox", None)
++        if tb is not None:
++            try:
++                table_bboxes.append((float(tb.l), float(tb.t), float(tb.r), float(tb.b)))
++            except Exception:
++                pass
++
++    cards = []
++    for idx, pic in enumerate(doc.pictures):
++        figure_id = f"fig_p{page_no}_{idx}"
++        try:
++            card = _build_card(pic, doc, page_fitz, heading_path, figure_id,
++                               table_bboxes, hash_cache)
++        except Exception as exc:
++            logger.warning("pdf_figures: %s failed: %s", figure_id, exc)
++            continue
++        if card:
++            cards.append(card)
++    return cards
++
++
++def _class_hint(pic) -> str:
++    try:
++        lbl = getattr(pic, "label", None) or getattr(pic, "predicted_class", None)
++        return str(lbl) if lbl else ""
++    except Exception:
++        return ""
++
++
++def _build_card(pic, doc, page_fitz, heading_path, figure_id, table_bboxes, hash_cache):
++    raw_bbox = getattr(pic, "bbox", None)
++    bbox = None
++    if raw_bbox is not None:
++        try:
++            bbox = (float(raw_bbox.l), float(raw_bbox.t),
++                    float(raw_bbox.r), float(raw_bbox.b))
++        except Exception:
++            pass
++
++    if bbox and _inside_table(bbox, table_bboxes):
++        return None
++
++    if bbox:
++        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
++        if w * h < 1000:
++            return None
++
++    xref = 0
++    try:
++        img = getattr(pic, "image", None)
++        if isinstance(img, dict):
++            xref = img.get("xref", 0)
++    except Exception:
++        pass
++    if hash_cache.get(xref, 1) >= 3:
++        return None
++
++    caption = ""
++    try:
++        caption = (pic.caption_text(doc=None) or "").strip()
++    except Exception:
++        pass
++
++    labels: list[str] = []
++    if bbox and page_fitz:
++        try:
++            import fitz
++            words = page_fitz.get_text("words", clip=fitz.Rect(*bbox))
++            labels = _dedup([w[4] for w in words])
++        except Exception:
++            pass
++
++    numbers = _extract_numbers(labels)
++    section = " > ".join(heading_path) if heading_path else ""
++
++    parts = []
++    if caption:
++        parts.append(f"Figure: {caption}")
++    if section:
++        parts.append(f"Section: {section}")
++    if labels:
++        parts.append(f"Labels: {', '.join(labels)}")
++    if numbers:
++        parts.append(f"Numbers: {', '.join(numbers)}")
++    card_text = " | ".join(parts) if parts else f"Figure {figure_id}"
++
++    if _generic_caption(card_text):
++        return None
++    if _has_repeated_ngram(card_text):
++        return None
++    if _zlib_ratio(card_text) < _ZLIB_RATIO_MIN:
++        return None
++
++    return {
++        "figure_id": figure_id,
++        "text": card_text,
++        "content_type": "figure",
++        "class_hint": _class_hint(pic),
++        "confidence": "high",
++    }
++
++
++def _generic_caption(text: str) -> bool:
++    return bool(_GENERIC_RE.match(text.strip())) and len(text.split()) < 12
++
+
+# ======================================================
+# Phase 4: parsers/pdf_cleanup.py  (WP2: second ToC branch; WP4: _pic narrowing)
+# ======================================================
+
+diff -ruN a/parsers/pdf_cleanup.py b/parsers/pdf_cleanup.py
+--- a/parsers/pdf_cleanup.py	2026-10-13 00:00:00.000000000 +0000
++++ b/parsers/pdf_cleanup.py	2026-10-13 00:01:00.000000000 +0000
+@@ -488,6 +488,30 @@ def _try_toc(rows: list[list[str]]) -> list[list[str]] | None:
+     return [[f"{(i + 1) if sequential else p[0]}.", p[1], p[2]] for i, p in enumerate(parsed)]
+ 
+ 
++_TOC_HEADING_RE = re.compile(
++    r"\b(?:content|contents|table\s+of\s+contents|inhalt)\b", re.I
++ )
++_DOT_LEADER_ROW_RE = re.compile(r"\.{4,}\s*\d+")
++
++
++def _is_toc_table(header: list[str], rows: list[list[str]], prev_heading: str) -> bool:
++    """v5.9 WP2: Second ToC detection branch for dotted-leader Honeywell format.
++
++    Matches when:
++    (a) The preceding heading text contains Content/Contents/Inhalt, OR
++    (b) >=50% of rows contain a dot-leader pattern (....N) in any cell.
++    """
++    if prev_heading and _TOC_HEADING_RE.search(prev_heading):
++        return True
++    if not rows:
++        return False
++    dot_rows = sum(
++        1 for r in rows
++        if any(_DOT_LEADER_ROW_RE.search(c) for c in r)
++    )
++    return dot_rows / len(rows) >= 0.5
++
++
++def _compact_toc_chunk(header: list[str], rows: list[list[str]]) -> str:
++    """v5.9 WP2: Emit a compact no-dots ToC text block tagged [TOC].
++
++    Dot leaders are stripped; page numbers kept.
++    content_type=toc is set by the calling code in the chunk metadata.
++    """
++    import re as _re
++    _DOTS = _re.compile(r"\.{3,}")
++    lines = ["[TOC]"]
++    for row in rows:
++        clean = [_DOTS.sub("", c).strip() for c in row]
++        clean = [c for c in clean if c]
++        if clean:
++            lines.append("  " + " | ".join(clean))
++    return "\n".join(lines)
++
++
+ def _emit_clean_table(block: list[str], out: list[str], vocab: Counter | None) -> None:
+     """Clean one pipe table (``block``) and append its markdown lines to ``out``."""
+@@ -502,6 +526,15 @@ def _emit_clean_table(block: list[str], out: list[str], vocab: Counter | None) -> None:
+         toc = _try_toc(raw)
+         if toc is not None:                           # v5.8: two-column contents table
+             header, rows = ["No.", "Section", "Page"], toc
++        elif settings.pdf_v59_toc and _is_toc_table(
++            header, rows,
++            prev_heading=getattr(_emit_clean_table, "_last_heading", ""),
++        ):
++            # v5.9 WP2: dotted-leader ToC detected -- emit compact toc block
++            out.append(_compact_toc_chunk(header, rows))
++            return
+         elif width >= 3 and re.match(r"^(\d+|I+|l+)\.?$", header[0]) and header[0]:
+             # contents table: no real header row -> treat every row as data
+             rows = _fix_toc_rows([header] + rows)
+
+# NOTE: also add `from config import settings` at top of pdf_cleanup.py
+# NOTE: the _last_heading tracking requires a small wrapper in clean_markdown_tables
+#       to set _emit_clean_table._last_heading before each table call.
+@@ -526,7 +555,10 @@ def clean_page_markdown(md: str, vocab: Counter | None = None) -> str:
+     # photo text: keep only when it reads like words (logo text survives, debris goes)
+     def _pic(m: re.Match) -> str:
+         inner = re.sub(r"<br\s*/?>", " ", m.group(1)).strip()
+-        return "\n\n" + inner + "\n\n" if inner and not is_noise_paragraph(inner) else "\n\n"
++        # v5.9 WP4: also keep instruction-like captions (numbered, imperative, or >6 words)
++        is_instruction = bool(re.match(
++            r"^\d+[.)\s]|^[A-Z][a-z]+ (?:the |a |an )|^Press\b|^Turn\b|^Insert\b|^Remove\b",
++            inner,
++        )) or len(inner.split()) > 6
++        keep = inner and (not is_noise_paragraph(inner) or is_instruction)
++        return "\n\n" + inner + "\n\n" if keep else "\n\n"
+     md = _PICTURE_TEXT_RE.sub(_pic, md)
+
+# ======================================================
+# Phase 5: parsers/pdf_router.py  (WP3 cellmarks + WP4 coverage + WP5 figures + WP7 crosscheck)
+# ======================================================
+
+diff -ruN a/parsers/pdf_router.py b/parsers/pdf_router.py
+--- a/parsers/pdf_router.py	2026-10-13 00:00:00.000000000 +0000
++++ b/parsers/pdf_router.py	2026-10-13 00:01:00.000000000 +0000
+@@ -1,5 +1,8 @@
+ # (existing imports — only additions shown)
+ from parsers import pdf_cleanup, pdf_structure
++from parsers import pdf_cellmarks  # v5.9 WP3
++from parsers import pdf_coverage   # v5.9 WP4
++from parsers import pdf_figures    # v5.9 WP5
+ 
+@@ -538,8 +541,21 @@ def parse(self, file_bytes, filename, **kwargs):
+         # v5.7: vocabulary from the PDF's own text layer + which pages have one.
+         page_texts = [p.get_text() for p in pdf]
+         self._vocab = pdf_cleanup.build_vocab(page_texts)
+         self._ocr_pages = {
+             i for i, t in enumerate(page_texts)
+             if settings.pdf_ocr_on_text_pages or len(t.strip()) < settings.pdf_text_layer_min_chars
+         }
++
++        # v5.9 WP4: raw text per page (un-cleaned) for coverage check.
++        page_raw_texts: list[str] = page_texts  # already collected above
++
++        # v5.9 WP3: scan all page texts once for availability legend.
++        tick_legend = None
++        if settings.pdf_v59_cellmarks:
++            tick_legend = pdf_cellmarks.scan_legend(page_texts)
++            if tick_legend:
++                logger.info("cellmarks: legend found: %s", tick_legend)
++
+@@ -578,7 +594,7 @@ def parse(self, file_bytes, filename, **kwargs):
+         pdf.close()
+-        return self._merge_pages(page_markdowns, filename)
++        return self._merge_pages(page_markdowns, filename, page_raw_texts)
+ 
+@@ -713,7 +729,29 @@ def _docling_page(self, file_bytes, filename, page_no, use_ocr=True):
+         doc = self._docling_full(file_bytes, filename, use_ocr)
++
++        # v5.9 WP3: inject availability marks before export.
++        if settings.pdf_v59_cellmarks:
++            try:
++                page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
++                tick_legend = getattr(self, "_tick_legend", None)
++                pdf_cellmarks.inject_marks(
++                    doc, page_fitz, tick_legend,
++                    repeat_min=settings.pdf_mark_repeat_min,
++                )
++            except Exception as exc:
++                logger.warning("cellmarks: page %d failed: %s", page_no, exc)
++
++        # v5.9 WP5: build figure cards before export.
++        if settings.pdf_figure_mode != "off":
++            try:
++                page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
++                heading_path = []  # will be populated by pdf_structure in _merge_pages
++                pdf_figures.process_pictures(
++                    doc, page_fitz, heading_path, page_no,
++                    mode=settings.pdf_figure_mode,
++                )
++            except Exception as exc:
++                logger.warning("pdf_figures: page %d failed: %s", page_no, exc)
++
+         return doc.export_to_markdown()
+ 
+@@ -744,6 +782,18 @@ def _smolvlm_page(self, file_bytes, filename, page_no, use_ocr=True):
+             _inject_picture_descriptions(doc)
++
++            # v5.9 WP3: inject availability marks before export.
++            if settings.pdf_v59_cellmarks:
++                try:
++                    page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
++                    tick_legend = getattr(self, "_tick_legend", None)
++                    pdf_cellmarks.inject_marks(
++                        doc, page_fitz, tick_legend,
++                        repeat_min=settings.pdf_mark_repeat_min,
++                    )
++                except Exception as exc:
++                    logger.warning("cellmarks (smolvlm path): page %d failed: %s", page_no, exc)
++
+             return doc.export_to_markdown()
+@@ -804,8 +854,38 @@ def _merge_pages(self, page_markdowns, filename):
+-    def _merge_pages(self, page_markdowns: list[str], filename: str) -> DoclingDocument:
++    def _merge_pages(
++        self,
++        page_markdowns: list[str],
++        filename: str,
++        page_raw_texts: list[str] | None = None,
++    ) -> DoclingDocument:
+         """Combine per-page markdown strings into a single DoclingDocument.
+ 
++        v5.9 WP4: page_raw_texts is the list of raw PyMuPDF text strings
++        (one per page). When provided, coverage.check_page() is called after
++        clean_page_markdown to repair near-matches and append uncovered text.
++        """
+         combined = DoclingDocument(name=filename.rsplit(".", 1)[0])
+         converter = DocumentConverter(allowed_formats=[InputFormat.MD])
+ 
+         if settings.pdf_v57_cleanup:
+             page_markdowns = pdf_cleanup.strip_running_lines(page_markdowns)
++            running_set = set()
++            for md in page_markdowns:
++                pass  # strip_running_lines already applied above
+             page_markdowns = [
+                 pdf_cleanup.clean_page_markdown(md, self._vocab) for md in page_markdowns
+             ]
++
++        # v5.9 WP4: text-coverage safety net.
++        if settings.pdf_v59_coverage and page_raw_texts:
++            running_lines: set[str] = set()
++            for i, (md, raw) in enumerate(zip(page_markdowns, page_raw_texts)):
++                try:
++                    page_markdowns[i] = pdf_coverage.check_page(
++                        md, raw, running_lines,
++                        recall_min=settings.pdf_coverage_recall_min,
++                        near_match_ratio=settings.pdf_coverage_near_match,
++                    )
++                except Exception as exc:
++                    logger.warning("coverage: page %d failed: %s", i + 1, exc)
++
+ 
+         for page_no, md in enumerate(page_markdowns, start=1):
+
+# ======================================================
+# Phase 6: parsers/pdf_structure.py  (WP6: heading blacklist, Profile N, doc metadata)
+# ======================================================
+
+diff -ruN a/parsers/pdf_structure.py b/parsers/pdf_structure.py
+--- a/parsers/pdf_structure.py	2026-10-13 00:00:00.000000000 +0000
++++ b/parsers/pdf_structure.py	2026-10-13 00:01:00.000000000 +0000
+@@ -38,6 +38,23 @@ _NUMBERED_RE = re.compile(r"^\d+(?:\.\d+){0,3}\.?\s+\S")
+ _CODE_CONTEXT_RE = re.compile(r"\b(?:use|enter|apply)\s+code\b|\bdi[s]?count\s+code\b", re.I)
+ _BUTTON_RE = re.compile(r"^(?:[a-z]{1,2}\s+)?(?:get|start|more|transform|buy|shop|learn|join|download|order|sign)\b", re.I)
+ 
++# v5.9 WP6: template heading blacklist
++_HEADING_BLACKLIST = {
++    "titelseite", "gb version",
++    "(text wird aus lv texte ...)",
++}
++_HEADING_BLACKLIST_RE = re.compile(
++    r"^(?:Fig\.|Abb\.)\s*\d+|^\(TEXT wird aus LV Texte", re.I
++ )
++_PROFILE_RE = re.compile(r"^Profile\s+\d+$", re.I)
++_FEATURES_RE = re.compile(r"^(?:Features|Functions):\s*$", re.I)
++_NUMBERED_OVERRIDE_RE = re.compile(r"^\d+(\.\d+){1,3}\s+\S")  # e.g. 4.5.5
++_DOC_NUMBER_RE = re.compile(r"\b(\d{5,}[A-Z]\d*\.\w+)\b")
++_DOC_VERSION_RE = re.compile(r"\bV(\d+(?:\.\d+)?)\b")
++_DOC_DATE_RE = re.compile(r"\b(\d{1,2}\.\d{4})\b")
++
+@@ -326,6 +343,52 @@ def repair_heading_numbers(doc: DoclingDocument) -> None:
+ 
+ 
++def blacklist_headings(doc: DoclingDocument) -> None:
++    """v5.9 WP6: Blank template headings that should not appear in chunks.
++
++    Converts Titelseite, GB Version, Fig.xy, Abb.xy items to empty text so
++    HierarchicalChunker skips them.  Also detects Profile N lines and ensures
++    they are labelled as SECTION_HEADER.
++    """
++    for item in _sequence(doc):
++        if not _is_heading(item):
++            continue
++        text = (item.text or "").strip()
++        if not text:
++            continue
++        if text.lower() in _HEADING_BLACKLIST or _HEADING_BLACKLIST_RE.match(text):
++            logger.debug("WP6: blacklisting heading %r", text)
++            item.text = ""
++            continue
++        # Profile N -> ensure SECTION_HEADER label
++        if _PROFILE_RE.match(text):
++            item.label = DocItemLabel.SECTION_HEADER
++        # Numbering regex override: if text starts with N.N.N pattern, enforce level
++        if _NUMBERED_OVERRIDE_RE.match(text) and hasattr(item, 'level'):
++            depth = text.split()[0].count('.')
++            item.level = min(depth + 1, 6)
++
++
++def extract_doc_metadata(page_texts: list[str]) -> dict:
++    """v5.9 WP6: Extract document number, version, and date from the first pages.
++
++    Scans the first 3 pages for patterns like 89470K2.GB0, V2, 11.2020.
++    Returns a dict with doc_number, doc_version, doc_date (empty strings if not found).
++    """
++    meta = {"doc_number": "", "doc_version": "", "doc_date": ""}
++    for text in page_texts[:3]:
++        if not meta["doc_number"]:
++            m = _DOC_NUMBER_RE.search(text)
++            if m:
++                meta["doc_number"] = m.group(1)
++        if not meta["doc_version"]:
++            m = _DOC_VERSION_RE.search(text)
++            if m:
++                meta["doc_version"] = f"V{m.group(1)}"
++        if not meta["doc_date"]:
++            m = _DOC_DATE_RE.search(text)
++            if m:
++                meta["doc_date"] = m.group(1)
++    return meta
++
++
+ def repair_pdf_structure(doc: DoclingDocument, vocab: Counter | None = None) -> None:
+     """Run every v5.7 document-level pass in dependency order."""
+     clean_text_items(doc, vocab)
+     repair_heading_numbers(doc)
+     demote_pseudo_headings(doc)
+     bind_captions(doc)
+     relevel_headings(doc)
+     dedupe_echoes(doc)
++    blacklist_headings(doc)  # v5.9 WP6
+
+# ======================================================
+# Phase 7a: test_parse.py  (WP0: add JSON output)
+# ======================================================
+
+diff -ruN a/test_parse.py b/test_parse.py
+--- a/test_parse.py	2026-10-13 00:00:00.000000000 +0000
++++ b/test_parse.py	2026-10-13 00:01:00.000000000 +0000
+@@ -1,9 +1,11 @@
+ """
+ Quick CLI utility to test parsing and hybrid chunking on any text or Markdown file.
+ 
+ Usage:
+     python test_parse.py path/to/document.txt
+     python test_parse.py path/to/document.md
++    PYTHONUTF8=1 python test_parse.py path/to/document.pdf
+ """
++import json
+ import sys
+ from pathlib import Path
+ 
+@@ -62,5 +64,16 @@ def main():
+         print(preview)
+         print(f"{'='*70}\n")
+ 
++    # v5.9 WP0: write full JSON dump for automated checks / inspection.
++    json_path = file_path.parent / f"chunks_{file_path.stem}.json"
++    out = [
++        {"chunk_index": i, "text": chunk, "metadata": meta, "id": cid}
++        for i, (chunk, meta, cid) in enumerate(zip(chunks, metadatas, chunk_ids))
++    ]
++    json_path.write_text(
++        json.dumps(out, ensure_ascii=False, indent=2),
++        encoding="utf-8",
++    )
++    print(f"\n[JSON] Written {len(out)} chunks to: {json_path}")
++    print("[Encoding] Check for mojibake: grep -P '[\u251C\u252C\u0393\u2229\u00C3\u00C2]' " + str(json_path))
+ 
+ 
+ if __name__ == "__main__":
+     main()
+
+# ======================================================
+# Phase 7b: tests/parsing_arch/v5_9/verify_v5_9.py  (WP0: golden questions + automated checks)
+# ======================================================
+
+diff -ruN a/tests/parsing_arch/v5_9/verify_v5_9.py b/tests/parsing_arch/v5_9/verify_v5_9.py
+--- a/tests/parsing_arch/v5_9/verify_v5_9.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/parsing_arch/v5_9/verify_v5_9.py	2026-10-13 00:00:00.000000000 +0000
+@@ -0,0 +1,208 @@
++"""v5.9 WP0: Automated golden-question harness and chunk-quality checks.
++
++Usage (no Chroma or MinIO required -- uses in-memory cosine similarity):
++    PYTHONUTF8=1 python -m pytest tests/parsing_arch/v5_9/verify_v5_9.py -v \
++        --chunks-json chunks_89470K2.json
++
++Or load a JSON produced by test_parse.py and run directly:
++    python tests/parsing_arch/v5_9/verify_v5_9.py chunks_89470K2.json
++"""
++from __future__ import annotations
++
++import json
++import re
++import sys
++import math
++from pathlib import Path
++from typing import Any
++
++
++# ---------------------------------------------------------------------------
++# In-memory retriever (cosine similarity with MiniLM)
++# ---------------------------------------------------------------------------
++
++def _embed(texts: list[str]):
++    from sentence_transformers import SentenceTransformer
++    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
++    return model.encode(texts, normalize_embeddings=True)
++
++
++def _cosine(a, b) -> float:
++    dot = sum(x * y for x, y in zip(a, b))
++    return dot  # already normalised
++
++
++def retrieve_top5(query: str, chunks: list[str], embeddings) -> list[str]:
++    q_emb = _embed([query])[0]
++    scores = [_cosine(q_emb, e) for e in embeddings]
++    top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:5]
++    return [chunks[i] for i in top]
++
++
++# ---------------------------------------------------------------------------
++# Automated chunk checks
++# ---------------------------------------------------------------------------
++
++def check_no_junk_chunks(chunks: list[str]) -> list[str]:
++    """No chunk should be separator-only or pure dots."""
++    junk_re = re.compile(r"^[\s|:.-]*$")
++    dots_re = re.compile(r"\.{5,}")
++    fails = []
++    for i, c in enumerate(chunks):
++        stripped = c.strip()
++        if junk_re.match(stripped):
++            fails.append(f"chunk #{i}: separator-only junk")
++        if dots_re.search(stripped):
++            fails.append(f"chunk #{i}: contains dot-leader run: {stripped[:60]!r}")
++    return fails
++
++
++def check_toc_not_indexed(chunks: list[str], metas: list[dict]) -> list[str]:
++    """content_type=toc chunks must be 0 (retriever filter gates them out)."""
++    fails = []
++    for i, m in enumerate(metas):
++        if m.get("content_type") == "toc":
++            fails.append(f"chunk #{i}: content_type=toc present in index (filter missing)")
++    return fails
++
++
++def check_table_headers(chunks: list[str]) -> list[str]:
++    """Every chunk with a pipe-table body should have a separator row -> header."""
++    fails = []
++    for i, c in enumerate(chunks):
++        lines = c.splitlines()
++        has_body = any(l.strip().startswith("|") and "---" not in l for l in lines[2:])
++        has_sep = any(re.match(r"^\|[-:| ]+\|\s*$", l) for l in lines)
++        if has_body and not has_sep:
++            fails.append(f"chunk #{i}: table body without header/separator")
++    return fails
++
++
++def check_metadata_completeness(metas: list[dict]) -> list[str]:
++    """heading_path, content_type, page_numbers, section_id must be present and str."""
++    required_str = ("heading_path", "content_type", "page_numbers", "section_id")
++    fails = []
++    for i, m in enumerate(metas):
++        for key in required_str:
++            val = m.get(key)
++            if val is None:
++                fails.append(f"chunk #{i}: missing metadata key {key!r}")
++            elif not isinstance(val, str):
++                fails.append(f"chunk #{i}: {key!r} is {type(val).__name__}, expected str")
++    return fails
++
++
++def check_encoding(chunks: list[str]) -> list[str]:
++    """No mojibake characters."""
++    mojibake_re = re.compile("[\u251C\u252C\u0393\u2229\u00C3\u00C2]")
++    fails = []
++    for i, c in enumerate(chunks):
++        if mojibake_re.search(c):
++            fails.append(f"chunk #{i}: contains mojibake: {c[:80]!r}")
++    return fails
++
++
++def check_no_classifier_labels(chunks: list[str]) -> list[str]:
++    """class_hint labels (Bar chart, Screenshot, etc.) must not appear in chunk text."""
++    hint_re = re.compile(r"\b(?:Bar chart|Pie chart|Screenshot from manual|Photograph|"
++                          r"Wiring diagram|Table)\b", re.I)
++    fails = []
++    for i, c in enumerate(chunks):
++        if hint_re.search(c):
++            fails.append(f"chunk #{i}: classifier label in text: {c[:80]!r}")
++    return fails
++
++
++# ---------------------------------------------------------------------------
++# Golden questions
++# ---------------------------------------------------------------------------
++
++GOLDEN_QUESTIONS = [
++    ("Does Profile 1 have presence 2?",           r"(?i)\bno\b.*presence\s*2|presence\s*2.*\bno\b"),
++    ("How to mount the nameplate on the SEM?",    r"(?i)ribbon cable|blue marking|nameplate"),
++    ("How to release the standalone nameplate?",  r"(?i)press.*lock|do not pull|unlock"),
++    ("SEM dimensions / hole spacing?",            r"120.*115.*46|85\s*mm"),
++    ("Does V05 support firmware update for SEM?", r"(?i)V05.*[Nn]o|[Nn]o.*V05|firmware.*V05"),
++    ("Which door variants work with SEM+?",       r"D1.*D2.*D3|D[123]"),
++    ("Which PoC variants support discrete speech?", r"(?i)P4|discrete speech"),
++    ("Is R-ABUS available on SEM?",               r"(?i)R-ABUS.*[Nn]o|SEM\+.*only"),
++    ("SCL position for 6-wire direct connection?",r"(?i)ID2|WRGY"),
++    ("Mode switch position for duty room?",       r"(?i)II.*SCVIP|SCVIP"),
++    ("Fire protection class?",                    r"V-0"),
++    ("SEM\+ idle / max current?",                r"60\s*mA|140\s*mA"),
++    ("Room type with 3 x P4 and D3?",             r"(?i)R5"),
++    ("Wire diameter accepted by terminals?",      r"0\.6.*0\.8\s*mm|0\.8.*0\.6\s*mm"),
++    ("Max DBUS cable length?",                    r"400\s*m"),
++]
++
++
++def run_golden_questions(chunks, embeddings) -> tuple[int, int, list[str]]:
++    fails = []
++    passed = 0
++    for question, pattern in GOLDEN_QUESTIONS:
++        top5 = retrieve_top5(question, chunks, embeddings)
++        found = any(re.search(pattern, c) for c in top5)
++        if found:
++            passed += 1
++        else:
++            fails.append(f"FAIL: {question!r}  (pattern: {pattern!r})")
++    return passed, len(GOLDEN_QUESTIONS), fails
++
++
++# ---------------------------------------------------------------------------
++# Main
++# ---------------------------------------------------------------------------
++
++def main() -> None:
++    if len(sys.argv) < 2:
++        print("Usage: python verify_v5_9.py chunks_<doc>.json")
++        sys.exit(1)
++
++    json_path = Path(sys.argv[1])
++    data = json.loads(json_path.read_text(encoding="utf-8"))
++    chunks = [d["text"] for d in data]
++    metas  = [d["metadata"] for d in data]
++
++    print(f"\nLoaded {len(chunks)} chunks from {json_path.name}")
++    print("=" * 60)
++
++    all_fails = []
++
++    # Automated checks
++    checks = [
++        ("No junk chunks",            check_no_junk_chunks(chunks)),
++        ("ToC not in index",          check_toc_not_indexed(chunks, metas)),
++        ("Table headers present",     check_table_headers(chunks)),
++        ("Metadata completeness",     check_metadata_completeness(metas)),
++        ("No encoding issues",        check_encoding(chunks)),
++        ("No classifier labels",      check_no_classifier_labels(chunks)),
++    ]
++    for name, fails in checks:
++        status = "PASS" if not fails else f"FAIL ({len(fails)} issues)"
++        print(f"  [{status}] {name}")
++        all_fails.extend(fails)
++
++    # Golden questions
++    print("\nRunning golden questions (requires sentence-transformers)...")
++    try:
++        embeddings = _embed(chunks)
++        passed, total, gq_fails = run_golden_questions(chunks, embeddings)
++        print(f"  Golden questions: {passed}/{total} passed")
++        all_fails.extend(gq_fails)
++    except ImportError:
++        print("  [SKIP] sentence-transformers not installed — skipping golden questions")
++
++    print("\n" + "=" * 60)
++    if all_fails:
++        print(f"TOTAL FAILURES: {len(all_fails)}")
++        for f in all_fails[:20]:
++            print(f"  - {f}")
++    else:
++        print("ALL CHECKS PASSED")
++
++    sys.exit(1 if all_fails else 0)
++
++
++if __name__ == "__main__":
++    main()
++

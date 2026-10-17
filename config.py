@@ -85,7 +85,21 @@ class Settings:
     # to collect the diagnostic output.  Never enable in production.
     pdf_debug_heading_dump: bool = bool(int(os.getenv("PDF_DEBUG_HEADING_DUMP", "0")))
 
+    # =========================================================================
+    # v5.9 kill-switches (all default on)
+    # =========================================================================
+    chunk_v59_tables: bool = os.getenv("CHUNK_V59_TABLES", "true").lower() == "true"  # WP1: table cleanup
+    pdf_v59_toc: bool = os.getenv("PDF_V59_TOC", "true").lower() == "true"  # WP2: ToC filter
+    pdf_v59_cellmarks: bool = os.getenv("PDF_V59_CELLMARKS", "true").lower() == "true"  # WP3: tick marks
+    pdf_v59_coverage: bool = os.getenv("PDF_V59_COVERAGE", "true").lower() == "true"  # WP4: coverage net
+    pdf_figure_mode: str = os.getenv("PDF_FIGURE_MODE", "labels_only")  # WP5: off / labels_only / vlm_fallback
+    pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
 
+    # v5.9 thresholds
+    pdf_coverage_recall_min: float = float(os.getenv("PDF_COVERAGE_RECALL_MIN", "0.9"))  # WP4
+    pdf_coverage_near_match: float = float(os.getenv("PDF_COVERAGE_NEAR_MATCH", "0.75"))  # WP4
+    chunk_header_cap_tokens: int = int(os.getenv("CHUNK_HEADER_CAP_TOKENS", "64"))  # WP1
+    pdf_mark_repeat_min: int = int(os.getenv("PDF_MARK_REPEAT_MIN", "3"))  # WP3
 
 
 settings = Settings()

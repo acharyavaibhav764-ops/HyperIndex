@@ -1,0 +1,695 @@
+diff -ruN a/core/chunk_cleanup.py b/core/chunk_cleanup.py
+--- a/core/chunk_cleanup.py	2026-10-14 05:53:55.612802201 +0000
++++ b/core/chunk_cleanup.py	2026-10-14 05:56:02.143088737 +0000
+@@ -56,11 +56,116 @@
+     return "\n" not in t and len(t) < 40 and len(t.split()) <= 3 and not re.search(r"\d", t)
+ 
+ 
++_TOC_HEAD_RE = re.compile(r"^(?:table of )?contents?\W*$|^inhalt(?:sverzeichnis)?\W*$", re.I)
++_TOC_ROW_RE = re.compile(
++    r"\.{3,}\s*\|?\s*\d+\s*\|?\s*$|^\|\s*\d+(?:\.\d+)*\.?\s*\|.*\|\s*\d+\s*\|\s*$"
++)
++_HEAD_NUM_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)\.?\s")
++_DOC_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])(\d{5,}[A-Z]\d*\.[A-Za-z0-9]+)")
++_DOC_VERSION_RE = re.compile(r"(?<![A-Za-z0-9])V(\d+(?:\.\d+)?)(?![A-Za-z0-9.])")
++_DOC_DATE_RE = re.compile(r"(?<![\d.])(\d{1,2}\.\d{4})(?![\d.])")
++
++
++def section_id(page: int | None, headings: Any) -> str:
++    """v5.9.1 WP6: 'p28:1.2' = page + number of the closest numbered heading (else 'p28')."""
++    base = f"p{page}" if page is not None else ""
++    for h in reversed(list(headings or [])):
++        m = _HEAD_NUM_RE.match(str(h))
++        if m:
++            return f"{base}:{m.group(1)}" if base else m.group(1)
++    return base
++
++
++def extract_doc_meta(page_texts: list[str]) -> dict[str, str]:
++    """v5.9.1 WP6: doc_number / doc_version / doc_date from the first three pages ('' if absent)."""
++    meta = {"doc_number": "", "doc_version": "", "doc_date": ""}
++    for text in page_texts[:3]:
++        if not meta["doc_number"] and (m := _DOC_NUMBER_RE.search(text)):
++            meta["doc_number"] = m.group(1)
++        if not meta["doc_version"] and (m := _DOC_VERSION_RE.search(text)):
++            meta["doc_version"] = f"V{m.group(1)}"
++        if not meta["doc_date"] and (m := _DOC_DATE_RE.search(text)):
++            meta["doc_date"] = m.group(1)
++    return meta
++
++
++def _table_lines(ls: list[str]) -> list[str]:
++    return [x for x in ls if x.strip().startswith("|")]
++
++
++def _last_heading(meta: dict[str, Any]) -> str:
++    hp = meta.get("heading_path")
++    if isinstance(hp, (list, tuple)):
++        return str(hp[-1]).strip() if hp else ""
++    return str(hp or "").split(" > ")[-1].strip()
++
++
++def _is_toc_chunk(text: str, meta: dict[str, Any]) -> bool:
++    if _TOC_HEAD_RE.match(_last_heading(meta)):
++        return True
++    lines = [x.strip() for x in text.split("\n") if x.strip() and not _SEP_ROW_RE.match(x.strip())]
++    hits = sum(1 for x in lines if _TOC_ROW_RE.search(x))
++    return hits >= 2 and hits / len(lines) >= 0.5
++
++
++def _toc_lines(text: str) -> list[str]:
++    out: list[str] = []
++    for x in text.split("\n"):
++        s = x.replace("[TOC]", "").replace("[Recovered text]", "").strip()
++        if not s or _SEP_ROW_RE.match(s) or _TOC_HEAD_RE.match(s) or s.lower().startswith("table of contents"):
++            continue
++        s = " ".join(c.strip() for c in s.strip("|").split("|") if c.strip())
++        s = re.sub(r"\s{2,}", " ", re.sub(r"\.{2,}", " ", s)).strip()
++        if s:
++            out.append(s)
++    return out
++
++
++def _union_pages(a: Any, b: Any) -> Any:
++    def as_list(v: Any) -> list[int]:
++        if isinstance(v, (list, tuple)):
++            return [int(i) for i in v]
++        return [int(i) for i in str(v or "").split(",") if i.strip().isdigit()]
++
++    u = sorted(set(as_list(a)) | set(as_list(b)))
++    return u if isinstance(a, (list, tuple)) or a is None else ",".join(str(i) for i in u)
++
++
++def _merge_toc(chunks: list[str], metas: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
++    """v5.9.1 WP2: collapse every run of consecutive ToC chunks into ONE compact 'toc' chunk."""
++    out_c: list[str] = []
++    out_m: list[dict[str, Any]] = []
++    run: list[str] = []
++    run_meta: dict[str, Any] | None = None
++    for c, m in zip(chunks, metas):
++        if m.get("content_type") == "toc":
++            run.extend(_toc_lines(c))
++            if run_meta is None:
++                run_meta = dict(m)
++            else:
++                run_meta["page_numbers"] = _union_pages(run_meta.get("page_numbers"), m.get("page_numbers"))
++            continue
++        if run_meta is not None:
++            out_c.append("Table of contents\n" + "\n".join(dict.fromkeys(run)))
++            out_m.append(run_meta)
++            run, run_meta = [], None
++        out_c.append(c)
++        out_m.append(m)
++    if run_meta is not None:
++        out_c.append("Table of contents\n" + "\n".join(dict.fromkeys(run)))
++        out_m.append(run_meta)
++    return out_c, out_m
++
++
+ def postprocess_chunks(
+     chunks: list[str], metas: list[dict[str, Any]], *, drop_micro: bool = False
+ ) -> tuple[list[str], list[dict[str, Any]]]:
+-    """Clean chunks: collapse separators, strip dots, drop junk, merge heading-only into next."""
+-    # Phase 1: apply text-level fixes
++    """Clean chunks: collapse separators, strip dots, drop junk, merge heading-only into next.
++
++    v5.9.1: junk test ignores the breadcrumb lines in front of a table; a header-only table
++    fragment is carried into the header-less table chunks that follow it; ToC chunks are tagged
++    content_type='toc' (incl. dot-leader recovered text) and merged into a single chunk.
++    """
+     cleaned: list[str] = []
+     for c in chunks:
+         c = strip_markup(c).strip()
+@@ -69,14 +174,16 @@
+         cleaned.append(c)
+ 
+     lines_list = [c.split("\n") for c in cleaned]
++    has_table = [bool(_table_lines(x)) for x in lines_list]
++    n = len(lines_list)
+ 
+-    # Phase 2: merge/drop logic
+     pending_heading: str = ""
++    table_hdr: list[str] | None = None
+     out_chunks: list[str] = []
+     out_metas: list[dict[str, Any]] = []
+ 
+     for i, ls in enumerate(lines_list):
+-        nxt = {_norm(x) for x in lines_list[i + 1][:3]} if i + 1 < len(lines_list) else set()
++        nxt = {_norm(x) for x in lines_list[i + 1][:3]} if i + 1 < n else set()
+ 
+         # Drop trailing line that is really the NEXT chunk's heading (v5.8)
+         if len(ls) > 1 and nxt:
+@@ -85,22 +192,40 @@
+                 ls = ls[:-1]
+ 
+         text = "\n".join(ls).strip()
++        tl = _table_lines(ls)
++        non_tl = [x for x in ls if x.strip() and not x.strip().startswith("|")]
+ 
+-        # Drop separator-only junk (v5.9 WP1)
+-        if _JUNK_CHUNK_RE.match(text):
++        # Drop separator-only junk, also when a breadcrumb sits in front of it (v5.9.1)
++        if _JUNK_CHUNK_RE.match(text) or (
++            tl and len(non_tl) <= 3 and all(_JUNK_CHUNK_RE.match(x.strip()) for x in tl)
++        ):
+             continue
+ 
+-        # Drop micro labels (v5.8)
+         if drop_micro and is_micro_label(text):
+             continue
+ 
+         norms = {_norm(x) for x in ls if x.strip()}
+ 
+-        # Heading-only: merge into next instead of dropping (v5.9 WP1)
+         if nxt and norms and norms <= nxt:
+             pending_heading = text if not pending_heading else pending_heading + "\n" + text
+             continue
+ 
++        # v5.9.1: table header bookkeeping
++        if not tl or any(_SEP_ROW_RE.match(x.strip()) for x in tl):
++            table_hdr = None
++        elif (
++            len(tl) == 1 and i + 1 < n and has_table[i + 1]
++            and not (i > 0 and has_table[i - 1] and _last_heading(metas[i - 1]) == _last_heading(metas[i]))
++        ):
++            hdr = tl[0].strip()
++            if not hdr.endswith("|"):
++                hdr += " |"
++            table_hdr = [hdr, "|" + "---|" * max(hdr.count("|") - 1, 1)]
++            continue  # header-only fragment: re-attached to the chunks below
++        elif table_hdr:
++            first = next(j for j, x in enumerate(ls) if x.strip().startswith("|"))
++            text = "\n".join(ls[:first] + table_hdr + ls[first:])
++
+         if pending_heading:
+             text = pending_heading + "\n" + text
+             pending_heading = ""
+@@ -108,11 +233,15 @@
+         out_chunks.append(text)
+         out_metas.append(metas[i])
+ 
+-    # Emit orphaned heading-only tail chunk
+     if pending_heading:
+         out_chunks.append(pending_heading)
+         if metas:
+             out_metas.append(metas[-1])
+ 
+-    return out_chunks, out_metas
+-
++    # v5.9.1 WP2: tag + merge ToC chunks
++    tagged: list[dict[str, Any]] = []
++    for c, m in zip(out_chunks, out_metas):
++        if m.get("content_type") != "toc" and _is_toc_chunk(c, m):
++            m = {**m, "content_type": "toc"}
++        tagged.append(m)
++    return _merge_toc(out_chunks, tagged)
+diff -ruN a/core/chunker.py b/core/chunker.py
+--- a/core/chunker.py	2026-10-14 05:53:55.615700604 +0000
++++ b/core/chunker.py	2026-10-14 05:54:30.912854270 +0000
+@@ -11,7 +11,12 @@
+ from langchain_text_splitters import RecursiveCharacterTextSplitter
+ 
+ from config import settings
+-from core.chunk_cleanup import is_micro_label, postprocess_chunks  # v5.8
++from core.chunk_cleanup import (  # v5.8 / v5.9.1
++    extract_doc_meta,
++    is_micro_label,
++    postprocess_chunks,
++    section_id,
++)
+ 
+ 
+ # =========================================================================
+@@ -33,6 +38,20 @@
+     return out
+ 
+ 
++def _doc_meta(doc: DoclingDocument) -> dict[str, str]:
++    """v5.9.1 WP6: doc_number / doc_version / doc_date from the first three pages of the document."""
++    empty = {"doc_number": "", "doc_version": "", "doc_date": ""}
++    try:
++        pages: dict[int, list[str]] = {}
++        for it in doc.texts:
++            prov = getattr(it, "prov", None)
++            if prov:
++                pages.setdefault(prov[0].page_no, []).append(it.text or "")
++        return extract_doc_meta(["\n".join(pages[p]) for p in sorted(pages)[:3]])
++    except Exception:
++        return empty
++
++
+ class _MarkdownTableChunkSerializer(ChunkingDocSerializer):
+     """v5.7: serialise tables as markdown (header + rows) instead of 'row, col = value'.
+ 
+@@ -218,6 +237,7 @@
+             repeat_table_header=True,
+         )
+         raw_chunks = list(chunker.chunk(doc))
++        doc_meta = _doc_meta(doc)  # v5.9.1 WP6
+ 
+         chunks: list[str] = []
+         metadatas: list[dict[str, Any]] = []
+@@ -298,7 +318,8 @@
+                 # v5.9 WP0b
+                 "heading_path": heading_list,
+                 "content_type": content_type,
+-                "section_id": f"p{page}" if page is not None else "",
++                "section_id": section_id(page, heading_list),
++                **doc_meta,
+             }
+             if is_picture_chunk:
+                 meta["source"] = "image_description"
+@@ -343,7 +364,8 @@
+                     # v5.9 WP0b
+                     "heading_path": [heading_text],
+                     "content_type": "text",
+-                    "section_id": f"p{page}" if page is not None else "",
++                    "section_id": section_id(page, [heading_text]),
++                    **doc_meta,
+                 }
+                 # v5.5 Fix B: insert at the end of the heading's own page instead
+                 # of appending at the tail (the "orphan chunks at end" bug).
+Binary files a/parsers/__pycache__/pdf_cellmarks.cpython-312.pyc and b/parsers/__pycache__/pdf_cellmarks.cpython-312.pyc differ
+diff -ruN a/parsers/pdf_cellmarks.py b/parsers/pdf_cellmarks.py
+--- a/parsers/pdf_cellmarks.py	2026-10-14 05:53:55.599085857 +0000
++++ b/parsers/pdf_cellmarks.py	2026-10-14 05:53:55.647288948 +0000
+@@ -47,6 +47,15 @@
+             and ix1 <= ox1 + tol and iy1 <= oy1 + tol)
+ 
+ 
++def _cand_hash(img: dict, page, xref: int) -> str:
++    """v5.9.1: availability ticks are INLINE images (xref == 0), so extract_image(xref) cannot
++    hash them. PyMuPDF already reports an MD5 'digest' per image in get_image_info()."""
++    d = img.get("digest")
++    if d:
++        return d.hex() if isinstance(d, (bytes, bytearray)) else str(d)
++    return _image_hash(page, xref) if xref else ""
++
++
+ def _image_hash(page, xref: int) -> str:
+     try:
+         data = page.parent.extract_image(xref)["image"]
+@@ -101,7 +110,7 @@
+     page_height = float(page_fitz.rect.height)
+ 
+     try:
+-        all_images = page_fitz.get_image_info(xrefs=True)
++        all_images = page_fitz.get_image_info(hashes=True, xrefs=True)
+     except Exception:
+         all_images = []
+ 
+@@ -150,7 +159,8 @@
+         if not in_cell:
+             continue
+         xref = img.get("xref", 0)
+-        candidates.append({"bbox": (ix0, iy0, ix1, iy1), "xref": xref})
++        candidates.append({"bbox": (ix0, iy0, ix1, iy1), "xref": xref,
++                           "hash": _cand_hash(img, page_fitz, xref)})
+ 
+     if not candidates:
+         for cell, _ in cells:
+@@ -159,7 +169,7 @@
+ 
+     hash_count: dict[str, int] = {}
+     for cand in candidates:
+-        h = _image_hash(page_fitz, cand["xref"])
++        h = cand["hash"]
+         if h:
+             hash_count[h] = hash_count.get(h, 0) + 1
+ 
+@@ -173,6 +183,7 @@
+                 continue
+             col_total[col_i] = col_total.get(col_i, 0) + 1
+ 
++    n_marked = 0
+     for cell, (cx0, cy0, cx1, cy1) in cells:
+         col_i = getattr(cell, "start_col_offset_idx", -1)
+         mark_found = False
+@@ -181,8 +192,8 @@
+             ix0, iy0, ix1, iy1 = cand["bbox"]
+             if not _inside(ix0, iy0, ix1, iy1, cx0, cy0, cx1, cy1):
+                 continue
+-            h = _image_hash(page_fitz, cand["xref"])
+-            if h not in mark_hashes:
++            h = cand["hash"]
++            if not h or h not in mark_hashes:
+                 col_img_count[col_i] = col_img_count.get(col_i, 0) + 1
+                 continue
+             if not _is_greenish(page_fitz, ix0, iy0, ix1, iy1):
+@@ -191,6 +202,7 @@
+             break
+ 
+         if mark_found:
++            n_marked += 1
+             old = (cell.text or "").strip()
+             if not old or old in ("...", "..."):
+                 cell.text = "Yes"
+@@ -203,6 +215,8 @@
+                 if ocr:
+                     cell.text = ocr
+ 
++    logger.info("cellmarks: %d cells, %d candidate imgs, %d mark hashes, %d cells marked",
++                len(cells), len(candidates), len(mark_hashes), n_marked)
+     header_row = grid[0] if grid else []
+     for col_i, img_c in col_img_count.items():
+         total = col_total.get(col_i, 1)
+diff -ruN a/parsers/pdf_coverage.py b/parsers/pdf_coverage.py
+--- a/parsers/pdf_coverage.py	2026-10-14 05:53:55.603458484 +0000
++++ b/parsers/pdf_coverage.py	2026-10-14 05:54:30.911256420 +0000
+@@ -2,6 +2,13 @@
+ 
+ Compares raw PyMuPDF text vs cleaned markdown per page.
+ Repairs near-matches in-place and appends uncovered lines as [Recovered text].
++
++v5.9.1 fixes
++  * Near-match is scored against the best single markdown LINE. v5.9 scored it against the whole
++    page, so the ratio was ~0 and no in-place repair could ever fire.
++  * Table-of-contents pages (>= 60 % dot-leader lines) are skipped, and dot-leader lines are never
++    re-added as recovered text.
++  * In-place repair keeps the list / heading prefix and never rewrites markdown table rows.
+ """
+ from __future__ import annotations
+ 
+@@ -13,7 +20,9 @@
+ 
+ _NORM_RE = re.compile(r"[\s\W]+")
+ _FIGURE_LABEL_RE = re.compile(r"^(?:[A-Z]{1,6}\s*\d*|Fig\.?\s*\d+|Figure\s*\d+)$", re.I)
+-_INSTRUCTION_RE = re.compile(r"^\d+[\.)\s]|^[A-Z][a-z]+ the |^Press\b|^Turn\b|^Insert\b|^Remove\b", re.I)
++_TOC_LINE_RE = re.compile(r"\.{3,}\s*\d+\s*$")
++_MD_PREFIX_RE = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s+)")
++_TOC_PAGE_RATIO = 0.6
+ 
+ 
+ def _norm(text: str) -> str:
+@@ -24,6 +33,35 @@
+     return bool(_FIGURE_LABEL_RE.match(line.strip())) and len(line.strip()) < 40
+ 
+ 
++def _is_toc_page(raw_lines: list[str]) -> bool:
++    dotted = sum(1 for ln in raw_lines if _TOC_LINE_RE.search(ln))
++    return dotted >= 5 and dotted / len(raw_lines) >= _TOC_PAGE_RATIO
++
++
++def _best_line(n_raw: str, md_lines: list[str], md_norms: list[str]) -> tuple[int, float]:
++    """Index and difflib ratio of the most similar non-table markdown line."""
++    best_i, best_r = -1, 0.0
++    lr = len(n_raw)
++    for i, n in enumerate(md_norms):
++        if not n or md_lines[i].lstrip().startswith("|"):
++            continue
++        if len(n) > lr * 2 or len(n) * 2 < lr:
++            continue
++        sm = SequenceMatcher(None, n_raw, n, autojunk=False)
++        if sm.real_quick_ratio() <= best_r or sm.quick_ratio() <= best_r:
++            continue
++        r = sm.ratio()
++        if r > best_r:
++            best_i, best_r = i, r
++    return best_i, best_r
++
++
++def _with_prefix(md_line: str, raw_line: str) -> str:
++    m = _MD_PREFIX_RE.match(md_line)
++    prefix = m.group(0) if m else ""
++    return prefix + raw_line.lstrip("-*+\u2022 ").strip()
++
++
+ def check_page(
+     page_md: str,
+     raw_text: str,
+@@ -39,7 +77,7 @@
+         page_md:          Cleaned markdown for this page.
+         raw_text:         Raw PyMuPDF text (page.get_text()).
+         running_lines:    Boilerplate strings from strip_running_lines.
+-        toc_page:         If True, skip this page entirely.
++        toc_page:         If True, skip this page entirely (auto-detected when False).
+         recall_min:       Warn when recall drops below this.
+         near_match_ratio: difflib ratio threshold for in-place repair.
+ 
+@@ -50,35 +88,43 @@
+         return page_md
+ 
+     raw_lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+-    if not raw_lines:
++    if not raw_lines or _is_toc_page(raw_lines):
+         return page_md
+ 
+-    md_norm = _norm(page_md)
++    try:
++        from parsers.pdf_cleanup import is_noise_paragraph
++    except Exception:  # pdf_cleanup pulls in heavy deps; the noise test is optional
++        is_noise_paragraph = None
++
++    md_lines = page_md.split("\n")
++    md_norms = [_norm(ln) for ln in md_lines]
++    md_all = " ".join(n for n in md_norms if n)
+     norm_running = {_norm(r) for r in running_lines}
+     covered: list[bool] = []
+     uncovered: list[str] = []
+-    repaired = page_md
+ 
+     for raw_line in raw_lines:
+         n_raw = _norm(raw_line)
+-        if not n_raw or n_raw in norm_running or _is_figure_label(raw_line):
++        if (
++            not n_raw
++            or n_raw in norm_running
++            or _is_figure_label(raw_line)
++            or _TOC_LINE_RE.search(raw_line)
++            or (is_noise_paragraph is not None and is_noise_paragraph(raw_line))
++        ):
+             covered.append(True)
+             continue
+-        try:
+-            from parsers.pdf_cleanup import is_noise_paragraph
+-            if is_noise_paragraph(raw_line):
+-                covered.append(True)
+-                continue
+-        except ImportError:
+-            pass
+ 
+-        if n_raw in md_norm:
++        if n_raw in md_all:
+             covered.append(True)
+             continue
+ 
+-        ratio = SequenceMatcher(None, n_raw, md_norm, autojunk=False).ratio()
+-        if ratio >= near_match_ratio:
+-            repaired = _repair_in_place(repaired, raw_line, near_match_ratio)
++        idx, ratio = _best_line(n_raw, md_lines, md_norms)
++        if idx >= 0 and ratio >= near_match_ratio:
++            if len(n_raw) > len(md_norms[idx]):  # md line lost words -> restore from text layer
++                md_lines[idx] = _with_prefix(md_lines[idx], raw_line)
++                md_norms[idx] = n_raw
++                md_all = " ".join(n for n in md_norms if n)
+             covered.append(True)
+             continue
+ 
+@@ -88,31 +134,13 @@
+     total = len(covered)
+     n_cov = sum(covered)
+     recall = n_cov / total if total else 1.0
+-
+     if recall < recall_min:
+         logger.warning(
+             "coverage: recall=%.2f < %.2f -- %d/%d lines uncovered",
+             recall, recall_min, total - n_cov, total,
+         )
+ 
++    repaired = "\n".join(md_lines)
+     if uncovered:
+         repaired = repaired.rstrip() + "\n\n[Recovered text]\n" + "\n".join(uncovered)
+-
+     return repaired
+-
+-
+-def _repair_in_place(md: str, raw_line: str, ratio_threshold: float) -> str:
+-    n_raw = _norm(raw_line)
+-    lines = md.split("\n")
+-    best_idx, best_ratio = -1, ratio_threshold - 0.01
+-    for i, line in enumerate(lines):
+-        n_line = _norm(line)
+-        if not n_line:
+-            continue
+-        r = SequenceMatcher(None, n_raw, n_line, autojunk=False).ratio()
+-        if r > best_ratio:
+-            best_ratio, best_idx = r, i
+-    if best_idx >= 0:
+-        lines[best_idx] = raw_line
+-        return "\n".join(lines)
+-    return md
+diff -ruN a/parsers/pdf_router.py b/parsers/pdf_router.py
+--- a/parsers/pdf_router.py	2026-10-14 05:53:55.606801292 +0000
++++ b/parsers/pdf_router.py	2026-10-14 05:53:55.648072332 +0000
+@@ -477,6 +477,20 @@
+     return flat
+ 
+ 
++_ITALIC_RE = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
++
++
++def _strip_inline_emphasis(md: str) -> str:
++    """v5.9.1: remove **bold** / *italic* markers before the markdown -> DoclingDocument round trip.
++
++    Docling's markdown backend splits or drops inline strong runs (lost: 'No' in '- No presence 2',
++    'SF12', 'be set.'; fragmented: 'without presence 2' / ', for' / '1 bed' on separate lines).
++    Emphasis carries no retrieval value, so it is removed up front. Headings (#) are untouched.
++    """
++    md = md.replace("**", "")
++    return _ITALIC_RE.sub(r"\1", md)
++
++
+ class PdfPageRouter(BaseParser):
+     """
+     v5.1 PDF per-page triage router.
+@@ -915,6 +929,7 @@
+                     logger.warning("coverage: page %d failed: %s", i + 1, exc)
+ 
+         for page_no, md in enumerate(page_markdowns, start=1):  # 1-indexed for humans
++            md = _strip_inline_emphasis(md)  # v5.9.1
+             stream = DocumentStream(
+                 name=f"page_{page_no}.md",
+                 stream=BytesIO(md.encode("utf-8")),
+diff -ruN a/parsers/pdf_structure.py b/parsers/pdf_structure.py
+--- a/parsers/pdf_structure.py	2026-10-14 05:53:55.609798179 +0000
++++ b/parsers/pdf_structure.py	2026-10-14 05:54:30.913403742 +0000
+@@ -380,21 +380,9 @@
+     Scans the first 3 pages for patterns like 89470K2.GB0, V2, 11.2020.
+     Returns a dict with doc_number, doc_version, doc_date (empty strings if not found).
+     """
+-    meta = {"doc_number": "", "doc_version": "", "doc_date": ""}
+-    for text in page_texts[:3]:
+-        if not meta["doc_number"]:
+-            m = _DOC_NUMBER_RE.search(text)
+-            if m:
+-                meta["doc_number"] = m.group(1)
+-        if not meta["doc_version"]:
+-            m = _DOC_VERSION_RE.search(text)
+-            if m:
+-                meta["doc_version"] = f"V{m.group(1)}"
+-        if not meta["doc_date"]:
+-            m = _DOC_DATE_RE.search(text)
+-            if m:
+-                meta["doc_date"] = m.group(1)
+-    return meta
++    from core.chunk_cleanup import extract_doc_meta  # v5.9.1: fixed regexes live there
++
++    return extract_doc_meta(page_texts)
+ 
+ 
+ def repair_pdf_structure(doc: DoclingDocument, vocab: Counter | None = None) -> None:
+diff -ruN a/tests/parsing_arch/v5_9/test_v5_9_1.py b/tests/parsing_arch/v5_9/test_v5_9_1.py
+--- a/tests/parsing_arch/v5_9/test_v5_9_1.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/parsing_arch/v5_9/test_v5_9_1.py	2026-10-14 05:54:57.662496261 +0000
+@@ -0,0 +1,111 @@
++"""v5.9.1 offline checks - pure Python + PyMuPDF, no Docling / Chroma / MinIO needed.
++
++Run from the repo root:   python -m pytest tests/parsing_arch/v5_9/test_v5_9_1.py -q
++Set V59_TEST_PDF to the path of 89470K2.GB0_V2.pdf to enable the real-PDF cellmarks check.
++"""
++import os
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
++
++from core.chunk_cleanup import extract_doc_meta, postprocess_chunks, section_id  # noqa: E402
++from parsers import pdf_coverage  # noqa: E402
++
++PDF = os.getenv("V59_TEST_PDF", "")
++
++
++# ---------------------------------------------------------------- WP3: ticks are inline images
++@pytest.mark.skipif(not PDF or not Path(PDF).exists(), reason="V59_TEST_PDF not set")
++@pytest.mark.parametrize("page_no,expected_min", [(5, 15), (21, 11)])
++def test_cellmarks_detects_inline_ticks(page_no, expected_min):
++    import pymupdf
++    from parsers import pdf_cellmarks
++
++    page = pymupdf.open(PDF)[page_no - 1]
++    tables = page.find_tables().tables
++    assert tables, "PyMuPDF found no table"
++    tab = max(tables, key=lambda t: len(t.cells))
++    grid = []
++    for row in tab.rows:
++        cells = []
++        for ci, rect in enumerate(row.cells):
++            r = rect or (0, 0, 0, 0)
++            cells.append(SimpleNamespace(
++                bbox=SimpleNamespace(l=r[0], t=r[1], r=r[2], b=r[3]),
++                text=page.get_textbox(r).strip() if rect else "",
++                start_col_offset_idx=ci))
++        grid.append(cells)
++    doc = SimpleNamespace(tables=[SimpleNamespace(data=SimpleNamespace(grid=grid))])
++    pdf_cellmarks.inject_marks(doc, page, {"tick": "Yes", "dots": "No"}, repeat_min=3)
++    yes = sum(1 for row in grid for c in row if c.text.startswith("Yes"))
++    assert yes >= expected_min, f"p.{page_no}: only {yes} ticks became 'Yes'"
++
++
++# ---------------------------------------------------------------- WP4: coverage
++def test_coverage_restores_dropped_bold_word():
++    md = "Features:\n- plug out call\n- presence 2\n- I/O Port"
++    raw = "Features:\n- plug out call\n- No presence 2\n- I/O Port"
++    out = pdf_coverage.check_page(md, raw, set())
++    assert "- No presence 2" in out
++    assert "[Recovered text]" not in out
++
++
++def test_coverage_never_rewrites_table_rows():
++    md = "| Fire class | V-0 |\n|---|---|"
++    out = pdf_coverage.check_page(md, "Fire protection class\nV-O", set())
++    assert out.startswith("| Fire class | V-0 |")
++
++
++def test_coverage_skips_toc_page():
++    raw = "\n".join(f"{i}.{j} Some section title ........ {i * 3 + j}" for i in range(1, 5) for j in range(1, 4))
++    assert pdf_coverage.check_page("Content", raw, set()) == "Content"
++
++
++# ---------------------------------------------------------------- WP1/WP2: chunk cleanup
++def _m(ct="table", hp=None, pages=(30,)):
++    return {"content_type": ct, "heading_path": hp or ["7. Specifications"], "page_numbers": list(pages)}
++
++
++def test_separator_only_chunk_with_breadcrumb_is_dropped():
++    ch = ["7. Specifications\n |\n|---|---|---|---|", "7. Specifications\n| a | b | c | d |"]
++    out, _ = postprocess_chunks(ch, [_m(), _m()])
++    assert len(out) == 1 and "a | b" in out[0]
++
++
++def test_header_fragment_is_carried_to_headerless_table_chunks():
++    ch = ["intro text here", "7. Specifications\n| Name | SEM+ | SEM | SCL",
++          "7. Specifications\n |\n|---|---|---|---|",
++          "7. Specifications\n| Idle | 60mA | 52mA | ? |", "7. Specifications\n| Max | 140mA | 130mA | ? |"]
++    out, _ = postprocess_chunks(ch, [_m("text")] + [_m()] * 4)
++    assert len(out) == 3
++    for body in out[1:]:
++        assert "| Name | SEM+ | SEM | SCL |" in body and "|---|---|---|---|" in body
++
++
++def test_toc_chunks_are_tagged_and_merged():
++    toc = [f"Content\n| 3.{i} | Section {i} ... | {10 + i} |\n| 3.{i}1 | Other {i} ... | {11 + i} |" for i in range(4)]
++    ch = ["Intro paragraph about the device."] + toc + ["1. General\nBody text of the real section."]
++    ms = [_m("text", ["Intro"], (1,))] + [_m("table", ["Content"], (3,))] * 4 + [_m("text", ["1. General"], (4,))]
++    out, metas = postprocess_chunks(ch, ms)
++    assert len(out) == 3 and metas[1]["content_type"] == "toc"
++    assert "..." not in out[1] and "3.2 Section 2" in out[1]
++
++
++# ---------------------------------------------------------------- WP6
++def test_section_id_uses_closest_numbered_heading():
++    assert section_id(28, ["5. Notes", "1.2 Separate cancel push-button for bed"]) == "p28:1.2"
++    assert section_id(18, ["3 Electrical connection", "3.9 Factory setting", "Profile 2:"]) == "p18:3.9"
++    assert section_id(1, ["Titel"]) == "p1" and section_id(None, []) == ""
++
++
++@pytest.mark.parametrize("text", ["89470K2.GB0_V2\n11.2020", "Installation Instruction\n89470K2.GB0\nV2 11.2020"])
++def test_doc_meta_from_raw_and_docling_text(text):
++    assert extract_doc_meta([text]) == {"doc_number": "89470K2.GB0", "doc_version": "V2", "doc_date": "11.2020"}
++
++
++def test_doc_meta_ignores_system_software_versions():
++    assert extract_doc_meta(["needs system software V05.xx and V12.xx"])["doc_version"] == ""
