@@ -12,7 +12,7 @@ class Retriever:
     Manage ChromaDB vector persistence and semantic query retrieval.
     
     Attributes:
-        embeddings - Embeddings function
+        embeddings
         chroma_client
         collection_name
         collection
