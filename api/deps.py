@@ -13,6 +13,7 @@ from core import (
     pipeline_settings,
 )
 from db.session import get_db
+from services.document_service import DocumentService
 from services.ingestion_service import IngestionService
 from services.rag_service import RAGService
 
@@ -89,3 +90,18 @@ def get_rag_service(
         generator=generator if not isinstance(generator, params.Depends) else get_generator(),
         retrieval_k=pipeline_settings.retrieval_k,
     )
+
+
+def get_document_service(
+    db: Session = Depends(get_db),
+    retriever: Retriever = Depends(get_retriever),
+    uploader: Uploader = Depends(get_uploader),
+) -> DocumentService:
+    resolved_db = db if not isinstance(db, params.Depends) else None
+    
+    return DocumentService(
+        db=resolved_db,
+        retriever=retriever if not isinstance(retriever, params.Depends) else get_retriever(),
+        uploader=uploader if not isinstance(uploader, params.Depends) else get_uploader(),
+    )
+
