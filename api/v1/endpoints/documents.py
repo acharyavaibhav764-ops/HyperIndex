@@ -5,9 +5,11 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 
 from api.deps import get_document_service, get_ingestion_service
 from schemas.document import (
+    DeleteDocumentResponse,
     DocumentDescription,
     GetDocumentChunksResponse,
     GetDocumentsResponse,
+    UpdateDocumentRequest,
 )
 from schemas.ingestion import DocumentIngestResponse
 from services.document_service import DocumentService
@@ -102,3 +104,38 @@ async def get_document_chunks(
         limit=limit,
         offset=offset,
     )
+
+
+# PATCH /api/v1/documents/{document_id}
+@router.patch(
+    "/{document_id}",
+    response_model=DocumentDescription,
+    summary="Update document metadata",
+    description="Update metadata attributes (such as product_id) across SQLite and all associated chunks in ChromaDB.",
+)
+async def update_document_metadata(
+    document_id: str,
+    payload: UpdateDocumentRequest,
+    service: DocumentService = Depends(get_document_service),
+) -> DocumentDescription:
+    
+    return service.update_document_metadata(
+        document_id=document_id,
+        product_id=payload.product_id,
+    )
+
+
+# DELETE /api/v1/documents/{document_id}
+@router.delete(
+    "/{document_id}",
+    response_model=DeleteDocumentResponse,
+    summary="Delete document",
+    description="Irreversibly delete a document and cascade deletion across ChromaDB vectors, SQLite metadata, and MinIO storage.",
+)
+async def delete_document(
+    document_id: str,
+    service: DocumentService = Depends(get_document_service),
+) -> DeleteDocumentResponse:
+    
+    return service.delete_document(document_id=document_id)
+

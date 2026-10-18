@@ -179,6 +179,32 @@ Example response:
 }
 ```
 
+### 3. List documents
+
+```powershell
+curl.exe -X GET "http://localhost:8000/api/v1/documents?limit=10&product_id=demo-product"
+```
+
+### 4. Inspect document chunks
+
+```powershell
+curl.exe -X GET "http://localhost:8000/api/v1/documents/<uuid>/chunks?limit=5"
+```
+
+### 5. Update document metadata
+
+```powershell
+curl.exe -X PATCH "http://localhost:8000/api/v1/documents/<uuid>" `
+  -H "Content-Type: application/json" `
+  -d '{"product_id":"updated-product-tag"}'
+```
+
+### 6. Delete document (Cascade across Vector, SQL, and Object storage)
+
+```powershell
+curl.exe -X DELETE "http://localhost:8000/api/v1/documents/<uuid>"
+```
+
 ## 🔌 API reference
 
 | Method | Endpoint | Purpose |
@@ -186,6 +212,11 @@ Example response:
 | `GET` | `/health` | Liveness check for the API |
 | `GET` | `/docs` | Swagger UI documentation |
 | `POST` | `/api/v1/documents` | Upload one or more documents and index them |
+| `GET` | `/api/v1/documents` | List indexed documents with filtering and pagination |
+| `GET` | `/api/v1/documents/{id}` | Retrieve metadata and live chunk count for a document |
+| `GET` | `/api/v1/documents/{id}/chunks` | Inspect raw text chunks and vector metadata |
+| `PATCH` | `/api/v1/documents/{id}` | Update document metadata (`product_id`) across SQLite and ChromaDB |
+| `DELETE` | `/api/v1/documents/{id}` | Cascade delete document from ChromaDB, SQLite, and MinIO |
 | `POST` | `/api/v1/query` | Ask a question against the indexed document corpus |
 
 The OpenAPI schema is generated automatically and served at `/docs`.
