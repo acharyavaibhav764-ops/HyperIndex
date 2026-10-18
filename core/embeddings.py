@@ -22,7 +22,8 @@ class Embeddings:
         function: Callable implementing ChromaDB's embedding protocol.
 
     Methods:
-        embed(texts): Generate vector embeddings for a list of strings.
+        embed()
+        _resolve_embedding_function()
     """
 
     def __init__(
@@ -43,6 +44,7 @@ class Embeddings:
     def _resolve_embedding_function(self, model_name: str, device: str) -> Any:
         """Resolve model name to a ChromaDB-compatible embedding function."""
 
+        # Map aliases of default embedding model to default embedding function
         default_aliases = {
             "all-minilm-l6-v2",
             "sentence-transformers/all-minilm-l6-v2",
@@ -53,6 +55,8 @@ class Embeddings:
             return DefaultEmbeddingFunction()
 
         try:
+
+            # Attempt the use of specific embedding model
             logger.info("Resolving SentenceTransformer model %r on device %r", model_name, device)
             return SentenceTransformerEmbeddingFunction(
                 model_name=model_name,

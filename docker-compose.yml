@@ -36,13 +36,16 @@ services:
   ollama:
     image: docker.io/ollama/ollama:latest
     container_name: honeywell_ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+
+    # Uncomment for GPU access
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    
     environment:
       OLLAMA_KEEP_ALIVE: -1
       OLLAMA_HOST: 0.0.0.0:11434
