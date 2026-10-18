@@ -2,11 +2,6 @@ from datetime import datetime
 from typing import Any
 from pydantic import BaseModel, Field
 
-# TODO: Backward compatibility re-export. Scheduled for complete elimination in CRUD v2.0
-# once api/v1/endpoints/ingestion.py and services/ingestion_service.py import directly from schemas.ingestion.
-from .ingestion import DocumentIngestItem, DocumentIngestResponse
-
-
 class DocumentDescription(BaseModel):
     document_id: str = Field(..., description="Unique document UUID")
     filename: str = Field(..., description="Original filename")

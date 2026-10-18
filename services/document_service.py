@@ -51,6 +51,7 @@ class DocumentService:
         self,
         product_id: str | None = None,
         name_search: str | None = None,
+        status: str | None = None,
         uploaded_after: datetime | None = None,
         uploaded_before: datetime | None = None,
         limit: int = 50,

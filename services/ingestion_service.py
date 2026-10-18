@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from core import Chunker, Embeddings, ParserRouter, Retriever, Uploader
 from db.models import Document
-from schemas.document import DocumentIngestItem, DocumentIngestResponse
+from schemas.ingestion import DocumentIngestItem, DocumentIngestResponse
 from utils.hasher import calculate_sha256
 
 
