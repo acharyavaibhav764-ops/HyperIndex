@@ -1,34 +1,43 @@
 import io
 import logging
 
+import fitz  # PyMuPDF
 from docling.datamodel.base_models import InputFormat
 from docling.document_converter import DocumentConverter
 from docling_core.types.doc import DoclingDocument
 from docling_core.types.io import DocumentStream
 
 from ..base import BaseParser
+from .backends import (
+    DoclingTableBackend,
+    PyMuPdfBackend,
+    VlmPictureBackend,
+    merge_pages_to_docling,
+    single_page_bytes,
+)
+from .triage import PageRoute, PageTriager
 
 logger = logging.getLogger(__name__)
 
 
 class PdfParser(BaseParser):
     """
-    Parse PDF documents into a DoclingDocument.
+    Parse PDF documents into a DoclingDocument using a per-page triage architecture.
 
-    Attributes:
-        _converter: Shared DocumentConverter instance for PDF processing.
-
-    Methods:
-        can_handle()
-        parse()
+    Text-heavy pages are processed via PyMuPDF4LLM for fast markdown generation.
+    Table pages are routed through Docling for high-fidelity table structures.
+    Image/diagram pages are routed through SmolVLM for visual descriptions.
     """
 
     SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".pdf"})
 
     def __init__(self) -> None:
-        """Initialize parser with lazy converter instantiation to avoid startup delay."""
+        """Initialize parser and lazy backends."""
 
-        self._converter: DocumentConverter | None = None
+        self.triager = PageTriager()
+        self.pymupdf_backend = PyMuPdfBackend()
+        self.docling_backend = DoclingTableBackend()
+        self.vlm_backend = VlmPictureBackend()
 
     def can_handle(self, ext: str) -> bool:
         """Return True if this parser supports the given file extension."""
@@ -36,13 +45,55 @@ class PdfParser(BaseParser):
         return ext.lower() in self.SUPPORTED_EXTENSIONS
 
     def parse(self, file_bytes: bytes, filename: str, **kwargs) -> DoclingDocument:
-        """Convert raw PDF file bytes into a DoclingDocument."""
+        """Convert raw PDF file bytes into a DoclingDocument using per-page triage."""
         
-        stream = DocumentStream(name=filename, stream=io.BytesIO(file_bytes))
+        try:
+            pdf = fitz.open(stream=file_bytes, filetype="pdf")
+        except Exception as exc:
+            logger.warning("Failed to open PDF with PyMuPDF: %s; falling back to Docling vanilla", exc)
+            stream = DocumentStream(name=filename, stream=io.BytesIO(file_bytes))
+            fallback_conv = DocumentConverter(allowed_formats=[InputFormat.PDF])
+            return fallback_conv.convert(stream).document
 
-        if self._converter is None:
-            self._converter = DocumentConverter(allowed_formats=[InputFormat.PDF])
+        page_markdowns: list[str] = []
 
-        result = self._converter.convert(stream)
-        return result.document
+        # Compile raw page markdowns after triage
+        try:
+            for page_idx, page in enumerate(pdf):
+                routes = self.triager.triage_page(page)
 
+                # Dual Table + Image route
+                if PageRoute.TABLE in routes and PageRoute.IMAGE in routes:
+                    p_bytes = single_page_bytes(pdf, page_idx)
+
+                    table_md = self.docling_backend.extract_page_markdown(p_bytes, filename)
+                    
+                    fig_captions = self.vlm_backend.extract_picture_descriptions_only(p_bytes, filename)
+                    
+                    combined_md = f"{table_md}\n\n{fig_captions}".strip() if fig_captions else table_md
+                    page_markdowns.append(combined_md)
+
+                # Table-only route
+                elif PageRoute.TABLE in routes:
+                    p_bytes = single_page_bytes(pdf, page_idx)
+                    
+                    md = self.docling_backend.extract_page_markdown(p_bytes, filename)
+                    page_markdowns.append(md)
+
+                # Image-only route
+                elif PageRoute.IMAGE in routes:
+                    p_bytes = single_page_bytes(pdf, page_idx)
+                    
+                    md = self.vlm_backend.extract_page_markdown(p_bytes, filename)
+                    page_markdowns.append(md)
+
+                # Default: Text-heavy route via PyMuPDF4LLM
+                else:
+                    md = self.pymupdf_backend.extract_page_markdown(pdf, page_idx)
+                    page_markdowns.append(md)
+
+        finally:
+            pdf.close()
+
+        # Merge to docling document
+        return merge_pages_to_docling(page_markdowns, filename)
