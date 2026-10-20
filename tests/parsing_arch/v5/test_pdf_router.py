@@ -105,7 +105,7 @@ class TestParseFallback:
         router = PdfPageRouter()
         router._docling_full = MagicMock(return_value=MagicMock(spec=DoclingDocument))
 
-        with patch("parsers.pdf_router.fitz") as mock_fitz:
+        with patch("parsers.pdf_router.pymupdf") as mock_fitz:
             router.parse(b"dummy", "test.pdf")
             mock_fitz.open.assert_not_called()
 
@@ -116,7 +116,7 @@ class TestParseFallback:
 
 class TestParseTriagePath:
     @patch("parsers.pdf_router.settings")
-    @patch("parsers.pdf_router.fitz")
+    @patch("parsers.pdf_router.pymupdf")
     def test_parse_calls_triage_for_each_page(self, mock_fitz, mock_settings):
         mock_settings.enable_pdf_page_router = True
         mock_settings.pdf_min_text_chars_for_text_route = 800
@@ -141,7 +141,7 @@ class TestParseTriagePath:
         assert router._triage_page.call_count == 2
 
     @patch("parsers.pdf_router.settings")
-    @patch("parsers.pdf_router.fitz")
+    @patch("parsers.pdf_router.pymupdf")
     def test_parse_routes_text_to_pymupdf4llm(self, mock_fitz, mock_settings):
         mock_settings.enable_pdf_page_router = True
         mock_settings.pdf_min_text_chars_for_text_route = 800
@@ -161,7 +161,7 @@ class TestParseTriagePath:
             mock_pml.to_markdown.assert_called_once()
 
     @patch("parsers.pdf_router.settings")
-    @patch("parsers.pdf_router.fitz")
+    @patch("parsers.pdf_router.pymupdf")
     def test_parse_routes_table_to_docling(self, mock_fitz, mock_settings):
         mock_settings.enable_pdf_page_router = True
         mock_settings.pdf_min_text_chars_for_text_route = 800
@@ -185,7 +185,7 @@ class TestParseTriagePath:
         router._docling_page.assert_called_once_with(single, "test.pdf", page.number)
 
     @patch("parsers.pdf_router.settings")
-    @patch("parsers.pdf_router.fitz")
+    @patch("parsers.pdf_router.pymupdf")
     def test_parse_routes_image_to_smolvlm(self, mock_fitz, mock_settings):
         mock_settings.enable_pdf_page_router = True
         mock_settings.pdf_min_text_chars_for_text_route = 800

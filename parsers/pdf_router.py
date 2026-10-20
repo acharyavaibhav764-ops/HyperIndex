@@ -111,7 +111,7 @@ import logging
 import re
 from io import BytesIO
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 import pymupdf4llm
 from docling.document_converter import DocumentConverter
 from docling.datamodel.base_models import InputFormat
@@ -553,7 +553,7 @@ class PdfPageRouter(BaseParser):
             logger.debug("PDF page router disabled — using full-document Docling conversion.")
             return self._docling_full(file_bytes, filename)
 
-        pdf = fitz.open(stream=file_bytes, filetype="pdf")
+        pdf = pymupdf.open(stream=file_bytes, filetype="pdf")
         page_markdowns: list[str] = []
 
         # v5.7: vocabulary from the PDF's own text layer + which pages have one.
@@ -612,7 +612,7 @@ class PdfPageRouter(BaseParser):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _single_page_bytes(pdf: fitz.Document, page_no: int) -> bytes:
+    def _single_page_bytes(pdf: pymupdf.Document, page_no: int) -> bytes:
         """Extract a single page from an open fitz.Document as standalone PDF bytes.
 
         Args:
@@ -622,7 +622,7 @@ class PdfPageRouter(BaseParser):
         Returns:
             bytes: A valid single-page PDF containing only the requested page.
         """
-        single = fitz.open()
+        single = pymupdf.open()
         single.insert_pdf(pdf, from_page=page_no, to_page=page_no)
         data = single.tobytes()
         single.close()
@@ -632,7 +632,7 @@ class PdfPageRouter(BaseParser):
     # Triage
     # ------------------------------------------------------------------
 
-    def _triage_page(self, page: fitz.Page) -> list[str]:
+    def _triage_page(self, page: pymupdf.Page) -> list[str]:
         """Classify a single PDF page into one or more routing categories.
 
         Returns a list so a page can simultaneously be ``'table'`` and
@@ -670,7 +670,7 @@ class PdfPageRouter(BaseParser):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _page_markdown(pdf: "fitz.Document", page_no: int, use_ocr: bool) -> str:
+    def _page_markdown(pdf: "pymupdf.Document", page_no: int, use_ocr: bool) -> str:
         """v5.7: pymupdf4llm markdown for one page, without running footers or OCR.
 
         ``header=False, footer=False`` drops the page-furniture blocks; ``use_ocr=False``
@@ -744,7 +744,7 @@ class PdfPageRouter(BaseParser):
         # v5.9 WP3: inject availability marks before export.
         if settings.pdf_v59_cellmarks:
             try:
-                page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
+                page_fitz = pymupdf.open(stream=file_bytes, filetype="pdf")[0]
                 tick_legend = getattr(self, "_tick_legend", None)
                 pdf_cellmarks.inject_marks(
                     doc, page_fitz, tick_legend,
@@ -757,7 +757,7 @@ class PdfPageRouter(BaseParser):
         cards = []
         if settings.pdf_figure_mode != "off":
             try:
-                page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
+                page_fitz = pymupdf.open(stream=file_bytes, filetype="pdf")[0]
                 heading_path = []  # will be populated by pdf_structure in _merge_pages
                 cards = pdf_figures.process_pictures(
                     doc, page_fitz, heading_path, page_no,
@@ -807,7 +807,7 @@ class PdfPageRouter(BaseParser):
             # v5.9 WP3: inject availability marks before export.
             if settings.pdf_v59_cellmarks:
                 try:
-                    page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
+                    page_fitz = pymupdf.open(stream=file_bytes, filetype="pdf")[0]
                     tick_legend = getattr(self, "_tick_legend", None)
                     pdf_cellmarks.inject_marks(
                         doc, page_fitz, tick_legend,
@@ -822,7 +822,7 @@ class PdfPageRouter(BaseParser):
                 "SmolVLM failed for page %d of %s: %s. Falling back to PyMuPDF4LLM.",
                 page_no, filename, exc,
             )
-            pdf = fitz.open(stream=file_bytes, filetype="pdf")
+            pdf = pymupdf.open(stream=file_bytes, filetype="pdf")
             # file_bytes is a single-page PDF; the only valid page index is 0
             md = pymupdf4llm.to_markdown(pdf, pages=[0])
             pdf.close()

@@ -67,9 +67,9 @@ def _image_hash(page, xref: int) -> str:
 
 def _is_greenish(page, x0, y0, x1, y1) -> bool:
     try:
-        import fitz
-        clip = fitz.Rect(x0, y0, x1, y1)
-        pm = page.get_pixmap(clip=clip, colorspace=fitz.csRGB, alpha=False)
+        import pymupdf
+        clip = pymupdf.Rect(x0, y0, x1, y1)
+        pm = page.get_pixmap(clip=clip, colorspace=pymupdf.csRGB, alpha=False)
         s = pm.samples
         if not s:
             return True
@@ -83,8 +83,8 @@ def _is_greenish(page, x0, y0, x1, y1) -> bool:
 
 def _ocr_cell(page, x0, y0, x1, y1) -> str:
     try:
-        import fitz
-        clip = fitz.Rect(x0, y0, x1, y1)
+        import pymupdf
+        clip = pymupdf.Rect(x0, y0, x1, y1)
         words = page.get_text("words", clip=clip)
         if words:
             return " ".join(w[4] for w in words).strip()
@@ -130,8 +130,8 @@ _SNAP_PITCH = 0.75     # v5.9.2: max distance to a row/col centre, as a fraction
 def _is_tick_colour(page, x0, y0, x1, y1) -> bool:
     """v5.9.2: stricter than _is_greenish - judged on the non-white pixels only."""
     try:
-        import fitz
-        pm = page.get_pixmap(clip=fitz.Rect(x0, y0, x1, y1), colorspace=fitz.csRGB, alpha=False)
+        import pymupdf
+        pm = page.get_pixmap(clip=pymupdf.Rect(x0, y0, x1, y1), colorspace=pymupdf.csRGB, alpha=False)
         s = pm.samples
         ink = green = 0
         for i in range(0, len(s) - 2, 3):
@@ -224,9 +224,9 @@ def _is_legend_swatch(page, bbox) -> bool:
     """v5.9.3: the tick in the table legend ("[tick] = available") is a key, not a table value.
     On the SEM manual it sits inside the last body row's box and was written into that row."""
     try:
-        import fitz
+        import pymupdf
         x0, y0, x1, y1 = bbox
-        words = page.get_text("words", clip=fitz.Rect(x1, y0 - 2, x1 + 40, y1 + 2))
+        words = page.get_text("words", clip=pymupdf.Rect(x1, y0 - 2, x1 + 40, y1 + 2))
         words.sort(key=lambda w: w[0])
         return bool(words) and words[0][4].startswith("=")
     except Exception:

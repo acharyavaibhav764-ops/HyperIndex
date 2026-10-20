@@ -151,10 +151,8 @@ def start_background(base: str, model: str, log_path: str) -> str:
 # ----------------------------------------------------------------------------
 def label_image_png(text: str = "SEM-IP ID1") -> bytes:
     """A small PNG with ``text`` rendered on it (needs PyMuPDF)."""
-    try:
-        import pymupdf
-    except ImportError:  # PyMuPDF < 1.24.3
-        import fitz as pymupdf  # type: ignore
+    import pymupdf  # PyMuPDF >= 1.24.3 (pinned in requirements.txt)
+
     pdf = pymupdf.open()
     page = pdf.new_page(width=260, height=90)
     page.insert_text((20, 55), text, fontsize=26)

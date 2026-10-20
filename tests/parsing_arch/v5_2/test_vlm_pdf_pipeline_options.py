@@ -109,7 +109,7 @@ class TestEnablePictureDescriptionGate:
         )
 
     @patch("parsers.pdf_router.settings")
-    @patch("parsers.pdf_router.fitz")
+    @patch("parsers.pdf_router.pymupdf")
     def test_smolvlm_page_respects_enable_picture_description(
         self, mock_fitz, mock_settings
     ):
@@ -139,7 +139,7 @@ class TestEnablePictureDescriptionGate:
         )
 
     @patch("parsers.pdf_router.settings")
-    @patch("parsers.pdf_router.fitz")
+    @patch("parsers.pdf_router.pymupdf")
     def test_picture_descriptions_only_respects_enable_picture_description(
         self, mock_fitz, mock_settings
     ):

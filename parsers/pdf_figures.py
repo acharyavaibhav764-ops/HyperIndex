@@ -142,8 +142,8 @@ def _build_card(pic, doc, page_fitz, heading_path, figure_id, table_bboxes, hash
     labels: list[str] = []
     if bbox and page_fitz:
         try:
-            import fitz
-            words = page_fitz.get_text("words", clip=fitz.Rect(*bbox))
+            import pymupdf
+            words = page_fitz.get_text("words", clip=pymupdf.Rect(*bbox))
             labels = _dedup([w[4] for w in words])
         except Exception:
             pass

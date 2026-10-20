@@ -212,7 +212,7 @@ class TestTableImageMerge:
         assert "text" not in result
 
     @patch("parsers.pdf_router.settings")
-    @patch("parsers.pdf_router.fitz")
+    @patch("parsers.pdf_router.pymupdf")
     def test_merged_page_keeps_table_and_picture_description(
         self, mock_fitz, mock_settings
     ):
