@@ -1,3 +1,4 @@
+import re
 from typing import Any, Union
 
 from docling.chunking import HybridChunker
@@ -22,6 +23,10 @@ from core.chunk_cleanup import (  # v5.8 / v5.9.1
 # =========================================================================
 # v5.9 WP0b — metadata helpers
 # =========================================================================
+
+# v6: Figure cards written by parsers/pdf_v6/cards.py.
+_FIGURE_CARD_RE = re.compile(r"(?m)^Figure: .*? \| (?:Type|Section|Labels):")
+
 
 def _flatten_meta(meta: dict[str, Any]) -> dict[str, Any]:
     """Convert list/None metadata to Chroma-safe scalars (str/int/float/bool)."""
@@ -292,7 +297,7 @@ class Chunker:
                 content_type = "toc"
             elif "[Recovered text]" in text:
                 content_type = "recovered_text"
-            elif text.startswith("Figure:") or is_picture_chunk:
+            elif text.startswith("Figure:") or _FIGURE_CARD_RE.search(text) or is_picture_chunk:
                 content_type = "figure"
             else:
                 try:

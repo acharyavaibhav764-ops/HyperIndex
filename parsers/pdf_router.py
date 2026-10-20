@@ -128,6 +128,7 @@ from docling_core.types.io import DocumentStream
 from config import settings
 from .base import BaseParser
 from .docling_parser import (
+    _build_figure_converter,
     _build_text_layer_converter,
     _build_vlm_converter,
     _inject_picture_descriptions,
@@ -137,6 +138,7 @@ from . import pdf_cellmarks  # v5.9 WP3
 from . import pdf_glyphs  # v5.9.2
 from . import pdf_coverage   # v5.9 WP4
 from . import pdf_figures    # v5.9 WP5
+from .pdf_v6 import cards as v6_cards, text as v6_text  # v6 phase 2
 
 logger = logging.getLogger(__name__)
 
@@ -521,6 +523,11 @@ class PdfPageRouter(BaseParser):
         self._vlm_converter_text: DocumentConverter | None = None
         self._vocab = None
         self._ocr_pages: set[int] = set()
+        # v6: figure pipeline state (converter without picture description, per-document run).
+        self._fig_converter: DocumentConverter | None = None
+        self._fig_converter_text: DocumentConverter | None = None
+        self._fig_run = None
+        self._heading_hint: str = ""
 
     # ------------------------------------------------------------------
     # BaseParser interface
@@ -556,6 +563,15 @@ class PdfPageRouter(BaseParser):
         pdf = pymupdf.open(stream=file_bytes, filetype="pdf")
         page_markdowns: list[str] = []
 
+        # v6: per-document figure state (repeated-image digests); hint = last heading seen.
+        self._heading_hint = ""
+        self._fig_run = None
+        if settings.pdf_figure_pipeline == "v6":
+            try:
+                self._fig_run = v6_cards.FigureRun.from_pdf(pdf, settings.pdf_figure_repeat_min_pages)
+            except Exception as exc:
+                logger.warning("pdf_v6: run setup failed: %s", exc)
+
         # v5.7: vocabulary from the PDF's own text layer + which pages have one.
         page_texts = [p.get_text() for p in pdf]
         self._vocab = pdf_cleanup.build_vocab(page_texts)
@@ -583,6 +599,7 @@ class PdfPageRouter(BaseParser):
             if routes == ["text"]:
                 # Fast path: no tables or images — plain PyMuPDF4LLM extraction
                 page_markdowns.append(self._page_markdown(pdf, page.number, use_ocr))
+                self._heading_hint = v6_text.last_heading(page_markdowns[-1]) or self._heading_hint
                 continue
 
             # Heavy path: at least one of table / image
@@ -603,6 +620,7 @@ class PdfPageRouter(BaseParser):
                     parts.append(self._smolvlm_page(single_bytes, filename, page.number, use_ocr))
 
             page_markdowns.append("\n\n".join(p for p in parts if p))
+            self._heading_hint = v6_text.last_heading(page_markdowns[-1]) or self._heading_hint
 
         pdf.close()
         return self._merge_pages(page_markdowns, filename, page_raw_texts)
@@ -724,6 +742,81 @@ class PdfPageRouter(BaseParser):
             self._vlm_converter_text = _build_vlm_converter(do_ocr=False)
         return self._vlm_converter_text
 
+    def _fig_for(self, use_ocr: bool) -> DocumentConverter:
+        """v6: cached converter with picture classification but NO picture description."""
+        if use_ocr:
+            if self._fig_converter is None:
+                self._fig_converter = _build_figure_converter(do_ocr=True)
+            return self._fig_converter
+        if self._fig_converter_text is None:
+            self._fig_converter_text = _build_figure_converter(do_ocr=False)
+        return self._fig_converter_text
+
+    @staticmethod
+    def _v6_markdown(doc) -> str:
+        """Markdown export without Docling's classifier label lines ("Screenshot from manual")."""
+        try:
+            return doc.export_to_markdown(include_picture_classification=False)
+        except TypeError:  # older Docling without the flag: drop the label lines afterwards
+            md = doc.export_to_markdown()
+            return v6_text.strip_classifier_labels(md) if isinstance(md, str) else md
+
+    def _v6_cards_md(self, doc, file_bytes: bytes, page_no: int, md: str) -> str:
+        """v6: Figure cards for one page as markdown paragraphs ('' if none)."""
+        if settings.pdf_figure_mode == "off":
+            return ""
+        page_doc = None
+        try:
+            page_doc = pymupdf.open(stream=file_bytes, filetype="pdf")
+            heading = v6_text.last_heading(md) or getattr(self, "_heading_hint", "")
+            cards = v6_cards.process_pictures(
+                doc, page_doc[0], [heading] if heading else [], page_no,
+                run=getattr(self, "_fig_run", None),
+            )
+            return "\n\n".join(c["text"] for c in cards if c.get("text"))
+        except Exception as exc:
+            logger.warning("pdf_v6: page %d failed: %s", page_no, exc)
+            return ""
+        finally:
+            if page_doc is not None:
+                try:
+                    page_doc.close()
+                except Exception:
+                    pass
+
+    def _v6_figure_page(self, file_bytes: bytes, filename: str, page_no: int, use_ocr: bool = True) -> str:
+        """v6: image page without SmolVLM captions.
+
+        Docling still extracts text/tables and classifies pictures; pictures become deterministic
+        Figure cards instead of free-text captions.  Falls back to PyMuPDF4LLM text if Docling fails.
+        """
+        try:
+            stream = DocumentStream(name=filename, stream=BytesIO(file_bytes))
+            doc = self._fig_for(use_ocr).convert(stream).document
+
+            if settings.pdf_v59_cellmarks:
+                try:
+                    page_fitz = pymupdf.open(stream=file_bytes, filetype="pdf")[0]
+                    pdf_cellmarks.inject_marks(
+                        doc, page_fitz, getattr(self, "_tick_legend", None),
+                        repeat_min=settings.pdf_mark_repeat_min,
+                    )
+                except Exception as exc:
+                    logger.warning("cellmarks (v6 figure path): page %d failed: %s", page_no, exc)
+
+            md = self._v6_markdown(doc)
+            cards = self._v6_cards_md(doc, file_bytes, page_no, md)
+            return f"{md}\n\n{cards}" if cards else md
+        except Exception as exc:
+            logger.warning(
+                "v6 figure page failed for page %d of %s: %s. Falling back to PyMuPDF4LLM.",
+                page_no, filename, exc,
+            )
+            pdf = pymupdf.open(stream=file_bytes, filetype="pdf")
+            md = pymupdf4llm.to_markdown(pdf, pages=[0])
+            pdf.close()
+            return md
+
     def _docling_page(self, file_bytes: bytes, filename: str, page_no: int, use_ocr: bool = True) -> str:
         """Extract a table-bearing page via Docling and return its markdown.
 
@@ -752,6 +845,12 @@ class PdfPageRouter(BaseParser):
                 )
             except Exception as exc:
                 logger.warning("cellmarks: page %d failed: %s", page_no, exc)
+
+        # v6: deterministic figure cards; the v5.9 block below stays for PDF_FIGURE_PIPELINE=v5.
+        if settings.pdf_figure_pipeline == "v6":
+            md = self._v6_markdown(doc)
+            card_md = self._v6_cards_md(doc, file_bytes, page_no, md)
+            return f"{md}\n\n{card_md}" if card_md else md
 
         # v5.9 WP5: build figure cards before export.
         cards = []
@@ -795,6 +894,10 @@ class PdfPageRouter(BaseParser):
         Returns:
             str: Markdown string with figure descriptions injected.
         """
+        # v6: no SmolVLM captions on PDF pages; pictures become Figure cards instead.
+        if settings.pdf_figure_pipeline == "v6":
+            return self._v6_figure_page(file_bytes, filename, page_no, use_ocr)
+
         try:
             stream = DocumentStream(name=filename, stream=BytesIO(file_bytes))
             doc = self._vlm_for(use_ocr).convert(stream).document
@@ -851,6 +954,10 @@ class PdfPageRouter(BaseParser):
             str: Newline-joined ``[Figure description]`` captions, or ``""`` on
                  failure.
         """
+        # v6: _docling_page() already emits this page's Figure cards; no SmolVLM captions.
+        if settings.pdf_figure_pipeline == "v6":
+            return ""
+
         try:
             stream = DocumentStream(name=filename, stream=BytesIO(file_bytes))
             doc = self._vlm_for(use_ocr).convert(stream).document

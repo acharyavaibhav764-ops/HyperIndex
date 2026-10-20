@@ -96,6 +96,14 @@ class Settings:
 
     # v6 phase 0: vision model for PDF diagrams, served by the Ollama service (see scripts/qwen_setup.py).
     pdf_vlm_model: str = os.getenv("PDF_VLM_MODEL", "qwen2.5vl:3b")
+
+    # v6 phase 2: figure pipeline switch. "v5" = v5.9 behaviour exactly; "v6" = parsers/pdf_v6
+    # (no SmolVLM on PDF pages, deterministic Figure cards). PDF_FIGURE_MODE=off still disables cards.
+    pdf_figure_pipeline: str = os.getenv("PDF_FIGURE_PIPELINE", "v5")
+    pdf_figure_repeat_min_pages: int = int(os.getenv("PDF_FIGURE_REPEAT_MIN_PAGES", "3"))
+    # Technical tokens that rescue a diagram the classifier called photo/logo/icon.
+    # Empty = built-in Honeywell nurse-call tokens (see parsers/pdf_v6/labels.py).
+    pdf_figure_tech_regex: str = os.getenv("PDF_FIGURE_TECH_REGEX", "")
     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
 
     # v5.9 thresholds

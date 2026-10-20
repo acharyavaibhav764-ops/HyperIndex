@@ -34,6 +34,25 @@ def _build_text_layer_converter() -> DocumentConverter:
     )
 
 
+def _build_figure_converter(do_ocr: bool = True) -> DocumentConverter:
+    """v6: PDF converter for image pages WITHOUT picture description.
+
+    Keeps the figure classifier (cheap, CPU) so ``parsers.pdf_v6`` can route pictures, but never
+    runs SmolVLM, so no free-text captions are generated.
+    """
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+    opts = PdfPipelineOptions(
+        do_ocr=do_ocr,
+        do_table_structure=True,
+        do_picture_classification=True,
+        generate_page_images=True,
+    )
+    return DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+    )
+
+
 def _build_vlm_converter(do_ocr: bool = True) -> DocumentConverter:
     """Build a DocumentConverter with VLM picture description enabled.
 
