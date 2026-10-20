@@ -1,0 +1,261 @@
+diff --git a/scripts/figure_eval.py b/scripts/figure_eval.py
+new file mode 100644
+index 0000000..77ca92e
+--- /dev/null
++++ b/scripts/figure_eval.py
+@@ -0,0 +1,124 @@
++"""v6 phase 6: which local VLM reads your diagrams best, with and without labels?
++
++Run from the repo root with Ollama up and the models pulled (python scripts/qwen_setup.py start):
++
++  python scripts/figure_eval.py list --pdf manual.pdf --pages 1-12
++  python scripts/figure_eval.py run  --pdf manual.pdf --gold scripts/gold_figures.json \\
++        --models qwen2.5vl:3b,qwen3-vl:4b --ollama http://localhost:11434 > results.csv
++
++``list`` prints candidate figure boxes (raster images + vector drawing clusters, top-left points)
++so you can write the gold file.  ``run`` scores, per figure and model, two prompts:
++  grounded = the figure's exact labels are in the prompt (what PDF_VLM_ENABLED=true ships)
++  blind    = no labels in the prompt (what the old SmolVLM path effectively did)
++Only connections that pass validation count, because only those would reach the index.
++Gate for switching the VLM on: kept-connection precision >= 0.9 on the gold set and grounded
++clearly above blind.  Precision matters more than recall: a wrong wire is worse than a missing one.
++"""
++import argparse
++import json
++import pathlib
++import sys
++import time
++import types
++
++ROOT = pathlib.Path(__file__).resolve().parents[1]
++if "parsers" not in sys.modules:  # import parsers.pdf_v6 without running parsers/__init__ (needs Docling)
++    _pkg = types.ModuleType("parsers")
++    _pkg.__path__ = [str(ROOT / "parsers")]
++    sys.modules["parsers"] = _pkg
++
++from parsers.pdf_v6 import gate, labels, ocr, text, vlm  # noqa: E402
++
++
++def _pairs(conns):
++    return {frozenset((text.norm(c[0]), text.norm(c[1]))) for c in conns}
++
++
++def score_edges(kept, gold):
++    """kept/gold: iterables of (a, b[, via]).  Undirected, normalised.  -> (precision, recall)."""
++    k, g = _pairs(kept), _pairs(gold)
++    tp = len(k & g)
++    return (tp / len(k) if k else 0.0, tp / len(g) if g else 0.0)
++
++
++def label_recall(found, gold_labels):
++    f = {text.norm(x) for x in found}
++    g = [text.norm(x) for x in gold_labels]
++    return sum(1 for x in g if x in f) / len(g) if g else 1.0
++
++
++def _pages(spec, n):
++    if not spec:
++        return range(n)
++    a, _, b = spec.partition("-")
++    return range(int(a) - 1, min(int(b or a), n))
++
++
++def cmd_list(args):
++    import pymupdf
++    pdf = pymupdf.open(args.pdf)
++    for p in _pages(args.pages, len(pdf)):
++        page = pdf[p]
++        boxes = [("image", tuple(i["bbox"])) for i in page.get_image_info()]
++        try:
++            boxes += [("vector", tuple(r)) for r in page.cluster_drawings()]
++        except Exception:
++            pass
++        for kind, b in boxes:
++            if gate.geometry_skip(b):
++                continue
++            found = labels.extract_labels(page, b)
++            print(f"p{p + 1:>3} {kind:6} bbox=[{b[0]:.0f},{b[1]:.0f},{b[2]:.0f},{b[3]:.0f}] "
++                  f"labels={len(found)} technical={labels.is_technical(found)}")
++
++
++def cmd_run(args):
++    import pymupdf
++    pdf = pymupdf.open(args.pdf)
++    gold = json.loads(pathlib.Path(args.gold).read_text(encoding="utf-8"))
++    print("id,model,prompt,label_recall,proposed,kept,precision,recall,seconds")
++    for fig in gold:
++        page = pdf[int(fig["page"]) - 1]
++        bbox = tuple(fig["bbox"])
++        found = labels.extract_labels(page, bbox)
++        src = "text_layer"
++        png = ocr.render_crop(page, bbox, args.dpi)
++        if len(found) < labels.MIN_LABELS_FOR_CARD:
++            found, src = ocr.ocr_labels(png, px_per_pt=ocr.effective_dpi(bbox, args.dpi) / 72.0), "ocr"
++        lr = label_recall(found, fig.get("labels", []))
++        gold_edges = [tuple(e) for e in fig.get("edges", [])]
++        for model in args.models.split(","):
++            for mode in ("grounded", "blind"):
++                prompt = vlm.build_prompt(found if mode == "grounded" else [], fig.get("section", ""), "")
++                t0 = time.time()
++                try:
++                    raw = vlm.parse_vlm_json(vlm.chat(png, prompt, model, args.ollama, "", args.timeout, "2m"))
++                except Exception as exc:
++                    print(f'{fig["id"]},{model},{mode},{lr:.2f},ERR,"{exc!r}",,,')
++                    continue
++                kept = vlm.validate_connections(raw, found)
++                p, r = score_edges([(c["from"], c["to"]) for c in kept], gold_edges)
++                print(f'{fig["id"]},{model},{mode},{lr:.2f},{len(raw)},{len(kept)},{p:.2f},{r:.2f},'
++                      f"{time.time() - t0:.1f}")
++        print(f"# {fig['id']}: labels from {src}: {len(found)}", file=sys.stderr)
++
++
++def main(argv=None):
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    a = sub.add_parser("list")
++    a.add_argument("--pdf", required=True)
++    a.add_argument("--pages", default="")
++    b = sub.add_parser("run")
++    b.add_argument("--pdf", required=True)
++    b.add_argument("--gold", required=True)
++    b.add_argument("--models", default="qwen2.5vl:3b")
++    b.add_argument("--ollama", default="http://localhost:11434")
++    b.add_argument("--dpi", type=int, default=200)
++    b.add_argument("--timeout", type=int, default=180)
++    args = ap.parse_args(argv)
++    {"list": cmd_list, "run": cmd_run}[args.cmd](args)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/gold_figures.template.json b/scripts/gold_figures.template.json
+new file mode 100644
+index 0000000..0bbf3c2
+--- /dev/null
++++ b/scripts/gold_figures.template.json
+@@ -0,0 +1,29 @@
++[
++  {
++    "id": "sem_ip_id1_room",
++    "page": 0,
++    "bbox": [0, 0, 0, 0],
++    "section": "FILL: section heading",
++    "labels": ["IP-PoE", "SEM-IP ID1", "DBUS 1", "DBUS 2", "SRT & SCB-RU", "SBU ID1", "WC", "SCU ID2", "PU (Max. 5 x)"],
++    "edges": [["IP-PoE", "SEM-IP ID1"], ["SCU ID2", "PU"]],
++    "_note": "EXAMPLE from your image 3. Set page (1-based) and bbox from `list`; add only connections you are sure about."
++  },
++  {
++    "id": "r5_three_bed_room",
++    "page": 0,
++    "bbox": [0, 0, 0, 0],
++    "section": "FILL",
++    "labels": ["Ward", "Room", "Bed 1", "Bed 2", "Bed 3", "Bathroom / Toilett", "ID1", "ID2", "ID3", "[2]", "[3]", "[4]", "[7]", "[14]", "[15]"],
++    "edges": [],
++    "_note": "EXAMPLE from your image 1. Fill edges you can verify by eye; leave [] to score labels only."
++  },
++  {
++    "id": "system_overview_5_5",
++    "page": 0,
++    "bbox": [0, 0, 0, 0],
++    "section": "5.5 System overview ward controller & cluster controller",
++    "labels": ["Server", "Switch", "SMCc", "SEM-IP ID2/3", "SCIP+", "SEM", "STIP", "SEM+", "SRT & SCB-RM"],
++    "edges": [["Server", "Switch"], ["Switch", "SMCc"], ["Switch", "SCIP+"]],
++    "_note": "EXAMPLE from your image 2."
++  }
++]
+diff --git a/tests/parsing_arch/v6/test_p6_eval.py b/tests/parsing_arch/v6/test_p6_eval.py
+new file mode 100644
+index 0000000..4d71c71
+--- /dev/null
++++ b/tests/parsing_arch/v6/test_p6_eval.py
+@@ -0,0 +1,90 @@
++"""v6 phase 6: the A/B harness (scripts/figure_eval.py) against a fake Ollama and a real PDF."""
++import importlib.util
++import json
++import pathlib
++import threading
++from http.server import BaseHTTPRequestHandler, HTTPServer
++
++import pymupdf
++import pytest
++
++ROOT = pathlib.Path(__file__).resolve().parents[3]
++
++
++@pytest.fixture(scope="module")
++def ev():
++    spec = importlib.util.spec_from_file_location("figure_eval", ROOT / "scripts" / "figure_eval.py")
++    mod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(mod)
++    return mod
++
++
++def test_scoring_helpers(ev):
++    assert ev.score_edges([("SEM-IP ID1", "SBU ID1"), ("A", "B")], [("sbu id1", "sem-ip id1"), ("C", "D")]) == (0.5, 0.5)
++    assert ev.score_edges([], []) == (0.0, 0.0)
++    assert ev.label_recall(["SEM-IP ID1"], ["sem-ip id1", "DBUS 1"]) == 0.5
++    assert ev.label_recall([], []) == 1.0
++
++
++def test_gold_template_is_valid_json_with_the_fields_run_needs():
++    gold = json.loads((ROOT / "scripts" / "gold_figures.template.json").read_text(encoding="utf-8"))
++    assert len(gold) >= 3
++    for g in gold:
++        assert {"id", "page", "bbox", "section", "labels", "edges"} <= set(g) and len(g["bbox"]) == 4
++
++
++def _fixture_pdf(tmp_path):
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=595, height=842)
++    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 20, 20), False)
++    pix.set_rect(pix.irect, (190, 190, 190))
++    page.insert_image(pymupdf.Rect(100, 200, 400, 420), stream=pix.tobytes("png"))
++    for y, t in [(230, "SEM-IP ID1"), (250, "DBUS 1"), (270, "SBU ID1")]:
++        page.insert_text((120, y), t, fontsize=8)
++    path = tmp_path / "m.pdf"
++    pdf.save(str(path))
++    return path
++
++
++def test_list_reports_figure_boxes_and_label_counts(ev, tmp_path, capsys):
++    ev.main(["list", "--pdf", str(_fixture_pdf(tmp_path))])
++    out = capsys.readouterr().out
++    assert "p  1 image  bbox=[100,200,400,420] labels=3 technical=True" in out
++
++
++def test_run_scores_grounded_and_blind_with_validation(ev, tmp_path, capsys):
++    bodies = []
++
++    class H(BaseHTTPRequestHandler):
++        def do_POST(self):
++            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
++            bodies.append(body)
++            grounded = "- SEM-IP ID1" in body["messages"][0]["content"]
++            conns = ([{"from": "SEM-IP ID1", "to": "SBU ID1", "via": "DBUS 1"}] if grounded
++                     else [{"from": "Server", "to": "Switch", "via": ""}])        # blind = hallucinated
++            out = json.dumps({"message": {"content": json.dumps({"connections": conns})}}).encode()
++            self.send_response(200)
++            self.send_header("Content-Length", str(len(out)))
++            self.end_headers()
++            self.wfile.write(out)
++
++        def log_message(self, *a):
++            pass
++
++    srv = HTTPServer(("127.0.0.1", 0), H)
++    threading.Thread(target=srv.serve_forever, daemon=True).start()
++    gold = tmp_path / "gold.json"
++    gold.write_text(json.dumps([{"id": "fig1", "page": 1, "bbox": [100, 200, 400, 420], "section": "5.6",
++                                 "labels": ["SEM-IP ID1", "DBUS 1", "SBU ID1", "SCU ID2"],
++                                 "edges": [["SEM-IP ID1", "SBU ID1"], ["SBU ID1", "SCU ID2"]]}]))
++    try:
++        ev.main(["run", "--pdf", str(_fixture_pdf(tmp_path)), "--gold", str(gold),
++                 "--models", "m1", "--ollama", f"http://127.0.0.1:{srv.server_port}", "--dpi", "100"])
++    finally:
++        srv.shutdown()
++    rows = [l.split(",") for l in capsys.readouterr().out.strip().splitlines()[1:]]
++    grounded, blind = rows
++    assert grounded[:3] == ["fig1", "m1", "grounded"] and grounded[3] == "0.75"        # 3 of 4 gold labels on the page
++    assert grounded[4:8] == ["1", "1", "1.00", "0.50"]                                  # 1 proposed, 1 kept, P=1, R=.5
++    assert blind[2] == "blind" and blind[4:8] == ["1", "0", "0.00", "0.00"]             # hallucination rejected
++    assert all(b["keep_alive"] == "2m" for b in bodies)

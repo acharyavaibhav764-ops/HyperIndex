@@ -1,0 +1,14 @@
+# Optional override: give the Ollama service the NVIDIA GPU (e.g. the GTX 1650 dev machine).
+# Without it the container runs on CPU, which works but is slow for vision models.
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d ollama
+# Needs Docker Desktop with WSL2 GPU support (or the NVIDIA Container Toolkit on Linux).
+# NOT tested on your machine: check `docker exec honeywell_ollama nvidia-smi` afterwards.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

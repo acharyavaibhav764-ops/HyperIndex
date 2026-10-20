@@ -1,0 +1,429 @@
+diff --git a/parsers/pdf_cellmarks.py b/parsers/pdf_cellmarks.py
+index 2245a25..93ca211 100644
+--- a/parsers/pdf_cellmarks.py
++++ b/parsers/pdf_cellmarks.py
+@@ -67,9 +67,9 @@ def _image_hash(page, xref: int) -> str:
+ 
+ def _is_greenish(page, x0, y0, x1, y1) -> bool:
+     try:
+-        import fitz
+-        clip = fitz.Rect(x0, y0, x1, y1)
+-        pm = page.get_pixmap(clip=clip, colorspace=fitz.csRGB, alpha=False)
++        import pymupdf
++        clip = pymupdf.Rect(x0, y0, x1, y1)
++        pm = page.get_pixmap(clip=clip, colorspace=pymupdf.csRGB, alpha=False)
+         s = pm.samples
+         if not s:
+             return True
+@@ -83,8 +83,8 @@ def _is_greenish(page, x0, y0, x1, y1) -> bool:
+ 
+ def _ocr_cell(page, x0, y0, x1, y1) -> str:
+     try:
+-        import fitz
+-        clip = fitz.Rect(x0, y0, x1, y1)
++        import pymupdf
++        clip = pymupdf.Rect(x0, y0, x1, y1)
+         words = page.get_text("words", clip=clip)
+         if words:
+             return " ".join(w[4] for w in words).strip()
+@@ -130,8 +130,8 @@ _SNAP_PITCH = 0.75     # v5.9.2: max distance to a row/col centre, as a fraction
+ def _is_tick_colour(page, x0, y0, x1, y1) -> bool:
+     """v5.9.2: stricter than _is_greenish - judged on the non-white pixels only."""
+     try:
+-        import fitz
+-        pm = page.get_pixmap(clip=fitz.Rect(x0, y0, x1, y1), colorspace=fitz.csRGB, alpha=False)
++        import pymupdf
++        pm = page.get_pixmap(clip=pymupdf.Rect(x0, y0, x1, y1), colorspace=pymupdf.csRGB, alpha=False)
+         s = pm.samples
+         ink = green = 0
+         for i in range(0, len(s) - 2, 3):
+@@ -224,9 +224,9 @@ def _is_legend_swatch(page, bbox) -> bool:
+     """v5.9.3: the tick in the table legend ("[tick] = available") is a key, not a table value.
+     On the SEM manual it sits inside the last body row's box and was written into that row."""
+     try:
+-        import fitz
++        import pymupdf
+         x0, y0, x1, y1 = bbox
+-        words = page.get_text("words", clip=fitz.Rect(x1, y0 - 2, x1 + 40, y1 + 2))
++        words = page.get_text("words", clip=pymupdf.Rect(x1, y0 - 2, x1 + 40, y1 + 2))
+         words.sort(key=lambda w: w[0])
+         return bool(words) and words[0][4].startswith("=")
+     except Exception:
+diff --git a/parsers/pdf_figures.py b/parsers/pdf_figures.py
+index 9e75c81..759ba56 100644
+--- a/parsers/pdf_figures.py
++++ b/parsers/pdf_figures.py
+@@ -142,8 +142,8 @@ def _build_card(pic, doc, page_fitz, heading_path, figure_id, table_bboxes, hash
+     labels: list[str] = []
+     if bbox and page_fitz:
+         try:
+-            import fitz
+-            words = page_fitz.get_text("words", clip=fitz.Rect(*bbox))
++            import pymupdf
++            words = page_fitz.get_text("words", clip=pymupdf.Rect(*bbox))
+             labels = _dedup([w[4] for w in words])
+         except Exception:
+             pass
+diff --git a/parsers/pdf_router.py b/parsers/pdf_router.py
+index ff35d31..f35bd1a 100644
+--- a/parsers/pdf_router.py
++++ b/parsers/pdf_router.py
+@@ -111,7 +111,7 @@ import logging
+ import re
+ from io import BytesIO
+ 
+-import fitz  # PyMuPDF
++import pymupdf  # PyMuPDF
+ import pymupdf4llm
+ from docling.document_converter import DocumentConverter
+ from docling.datamodel.base_models import InputFormat
+@@ -553,7 +553,7 @@ class PdfPageRouter(BaseParser):
+             logger.debug("PDF page router disabled — using full-document Docling conversion.")
+             return self._docling_full(file_bytes, filename)
+ 
+-        pdf = fitz.open(stream=file_bytes, filetype="pdf")
++        pdf = pymupdf.open(stream=file_bytes, filetype="pdf")
+         page_markdowns: list[str] = []
+ 
+         # v5.7: vocabulary from the PDF's own text layer + which pages have one.
+@@ -612,7 +612,7 @@ class PdfPageRouter(BaseParser):
+     # ------------------------------------------------------------------
+ 
+     @staticmethod
+-    def _single_page_bytes(pdf: fitz.Document, page_no: int) -> bytes:
++    def _single_page_bytes(pdf: pymupdf.Document, page_no: int) -> bytes:
+         """Extract a single page from an open fitz.Document as standalone PDF bytes.
+ 
+         Args:
+@@ -622,7 +622,7 @@ class PdfPageRouter(BaseParser):
+         Returns:
+             bytes: A valid single-page PDF containing only the requested page.
+         """
+-        single = fitz.open()
++        single = pymupdf.open()
+         single.insert_pdf(pdf, from_page=page_no, to_page=page_no)
+         data = single.tobytes()
+         single.close()
+@@ -632,7 +632,7 @@ class PdfPageRouter(BaseParser):
+     # Triage
+     # ------------------------------------------------------------------
+ 
+-    def _triage_page(self, page: fitz.Page) -> list[str]:
++    def _triage_page(self, page: pymupdf.Page) -> list[str]:
+         """Classify a single PDF page into one or more routing categories.
+ 
+         Returns a list so a page can simultaneously be ``'table'`` and
+@@ -670,7 +670,7 @@ class PdfPageRouter(BaseParser):
+     # ------------------------------------------------------------------
+ 
+     @staticmethod
+-    def _page_markdown(pdf: "fitz.Document", page_no: int, use_ocr: bool) -> str:
++    def _page_markdown(pdf: "pymupdf.Document", page_no: int, use_ocr: bool) -> str:
+         """v5.7: pymupdf4llm markdown for one page, without running footers or OCR.
+ 
+         ``header=False, footer=False`` drops the page-furniture blocks; ``use_ocr=False``
+@@ -744,7 +744,7 @@ class PdfPageRouter(BaseParser):
+         # v5.9 WP3: inject availability marks before export.
+         if settings.pdf_v59_cellmarks:
+             try:
+-                page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
++                page_fitz = pymupdf.open(stream=file_bytes, filetype="pdf")[0]
+                 tick_legend = getattr(self, "_tick_legend", None)
+                 pdf_cellmarks.inject_marks(
+                     doc, page_fitz, tick_legend,
+@@ -757,7 +757,7 @@ class PdfPageRouter(BaseParser):
+         cards = []
+         if settings.pdf_figure_mode != "off":
+             try:
+-                page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
++                page_fitz = pymupdf.open(stream=file_bytes, filetype="pdf")[0]
+                 heading_path = []  # will be populated by pdf_structure in _merge_pages
+                 cards = pdf_figures.process_pictures(
+                     doc, page_fitz, heading_path, page_no,
+@@ -807,7 +807,7 @@ class PdfPageRouter(BaseParser):
+             # v5.9 WP3: inject availability marks before export.
+             if settings.pdf_v59_cellmarks:
+                 try:
+-                    page_fitz = fitz.open(stream=file_bytes, filetype="pdf")[0]
++                    page_fitz = pymupdf.open(stream=file_bytes, filetype="pdf")[0]
+                     tick_legend = getattr(self, "_tick_legend", None)
+                     pdf_cellmarks.inject_marks(
+                         doc, page_fitz, tick_legend,
+@@ -822,7 +822,7 @@ class PdfPageRouter(BaseParser):
+                 "SmolVLM failed for page %d of %s: %s. Falling back to PyMuPDF4LLM.",
+                 page_no, filename, exc,
+             )
+-            pdf = fitz.open(stream=file_bytes, filetype="pdf")
++            pdf = pymupdf.open(stream=file_bytes, filetype="pdf")
+             # file_bytes is a single-page PDF; the only valid page index is 0
+             md = pymupdf4llm.to_markdown(pdf, pages=[0])
+             pdf.close()
+diff --git a/requirements.txt b/requirements.txt
+index 25c434f..da7d3f4 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -8,5 +8,5 @@ pypdf==5.0.1
+ python-docx==1.1.2
+ python-pptx>=1.0.0
+ docling>=2.0.0
+-pymupdf>=1.24.0
++pymupdf>=1.24.3
+ pymupdf4llm>=0.0.17
+\ No newline at end of file
+diff --git a/scripts/qwen_setup.py b/scripts/qwen_setup.py
+index c197346..2807672 100644
+--- a/scripts/qwen_setup.py
++++ b/scripts/qwen_setup.py
+@@ -151,10 +151,8 @@ def start_background(base: str, model: str, log_path: str) -> str:
+ # ----------------------------------------------------------------------------
+ def label_image_png(text: str = "SEM-IP ID1") -> bytes:
+     """A small PNG with ``text`` rendered on it (needs PyMuPDF)."""
+-    try:
+-        import pymupdf
+-    except ImportError:  # PyMuPDF < 1.24.3
+-        import fitz as pymupdf  # type: ignore
++    import pymupdf  # PyMuPDF >= 1.24.3 (pinned in requirements.txt)
++
+     pdf = pymupdf.open()
+     page = pdf.new_page(width=260, height=90)
+     page.insert_text((20, 55), text, fontsize=26)
+diff --git a/tests/parsing_arch/v5/test_pdf_router.py b/tests/parsing_arch/v5/test_pdf_router.py
+index 5bd854a..46553d7 100644
+--- a/tests/parsing_arch/v5/test_pdf_router.py
++++ b/tests/parsing_arch/v5/test_pdf_router.py
+@@ -105,7 +105,7 @@ class TestParseFallback:
+         router = PdfPageRouter()
+         router._docling_full = MagicMock(return_value=MagicMock(spec=DoclingDocument))
+ 
+-        with patch("parsers.pdf_router.fitz") as mock_fitz:
++        with patch("parsers.pdf_router.pymupdf") as mock_fitz:
+             router.parse(b"dummy", "test.pdf")
+             mock_fitz.open.assert_not_called()
+ 
+@@ -116,7 +116,7 @@ class TestParseFallback:
+ 
+ class TestParseTriagePath:
+     @patch("parsers.pdf_router.settings")
+-    @patch("parsers.pdf_router.fitz")
++    @patch("parsers.pdf_router.pymupdf")
+     def test_parse_calls_triage_for_each_page(self, mock_fitz, mock_settings):
+         mock_settings.enable_pdf_page_router = True
+         mock_settings.pdf_min_text_chars_for_text_route = 800
+@@ -141,7 +141,7 @@ class TestParseTriagePath:
+         assert router._triage_page.call_count == 2
+ 
+     @patch("parsers.pdf_router.settings")
+-    @patch("parsers.pdf_router.fitz")
++    @patch("parsers.pdf_router.pymupdf")
+     def test_parse_routes_text_to_pymupdf4llm(self, mock_fitz, mock_settings):
+         mock_settings.enable_pdf_page_router = True
+         mock_settings.pdf_min_text_chars_for_text_route = 800
+@@ -161,7 +161,7 @@ class TestParseTriagePath:
+             mock_pml.to_markdown.assert_called_once()
+ 
+     @patch("parsers.pdf_router.settings")
+-    @patch("parsers.pdf_router.fitz")
++    @patch("parsers.pdf_router.pymupdf")
+     def test_parse_routes_table_to_docling(self, mock_fitz, mock_settings):
+         mock_settings.enable_pdf_page_router = True
+         mock_settings.pdf_min_text_chars_for_text_route = 800
+@@ -185,7 +185,7 @@ class TestParseTriagePath:
+         router._docling_page.assert_called_once_with(single, "test.pdf", page.number)
+ 
+     @patch("parsers.pdf_router.settings")
+-    @patch("parsers.pdf_router.fitz")
++    @patch("parsers.pdf_router.pymupdf")
+     def test_parse_routes_image_to_smolvlm(self, mock_fitz, mock_settings):
+         mock_settings.enable_pdf_page_router = True
+         mock_settings.pdf_min_text_chars_for_text_route = 800
+diff --git a/tests/parsing_arch/v5_1/test_page_provenance.py b/tests/parsing_arch/v5_1/test_page_provenance.py
+index 474ed70..a50ebe1 100644
+--- a/tests/parsing_arch/v5_1/test_page_provenance.py
++++ b/tests/parsing_arch/v5_1/test_page_provenance.py
+@@ -212,7 +212,7 @@ class TestTableImageMerge:
+         assert "text" not in result
+ 
+     @patch("parsers.pdf_router.settings")
+-    @patch("parsers.pdf_router.fitz")
++    @patch("parsers.pdf_router.pymupdf")
+     def test_merged_page_keeps_table_and_picture_description(
+         self, mock_fitz, mock_settings
+     ):
+diff --git a/tests/parsing_arch/v5_2/test_vlm_pdf_pipeline_options.py b/tests/parsing_arch/v5_2/test_vlm_pdf_pipeline_options.py
+index 6528596..491da91 100644
+--- a/tests/parsing_arch/v5_2/test_vlm_pdf_pipeline_options.py
++++ b/tests/parsing_arch/v5_2/test_vlm_pdf_pipeline_options.py
+@@ -109,7 +109,7 @@ class TestEnablePictureDescriptionGate:
+         )
+ 
+     @patch("parsers.pdf_router.settings")
+-    @patch("parsers.pdf_router.fitz")
++    @patch("parsers.pdf_router.pymupdf")
+     def test_smolvlm_page_respects_enable_picture_description(
+         self, mock_fitz, mock_settings
+     ):
+@@ -139,7 +139,7 @@ class TestEnablePictureDescriptionGate:
+         )
+ 
+     @patch("parsers.pdf_router.settings")
+-    @patch("parsers.pdf_router.fitz")
++    @patch("parsers.pdf_router.pymupdf")
+     def test_picture_descriptions_only_respects_enable_picture_description(
+         self, mock_fitz, mock_settings
+     ):
+diff --git a/tests/parsing_arch/v6/test_p1_pymupdf.py b/tests/parsing_arch/v6/test_p1_pymupdf.py
+new file mode 100644
+index 0000000..4361c32
+--- /dev/null
++++ b/tests/parsing_arch/v6/test_p1_pymupdf.py
+@@ -0,0 +1,150 @@
++"""v6 phase 1: `fitz` -> `import pymupdf` migration.
++
++The behaviour tests run real PyMuPDF (no mocks).  They matter because pdf_cellmarks wraps its
++PyMuPDF calls in ``except Exception`` and quietly returns a default: a wrong import would
++silently switch the v5.9 tick/legend logic off instead of failing.  Every assertion below is on
++a value the fallback path could not produce.
++"""
++import ast
++import pathlib
++
++import pymupdf
++
++from parsers import pdf_cellmarks as cm
++from parsers.pdf_router import PdfPageRouter
++
++ROOT = pathlib.Path(__file__).resolve().parents[3]
++
++
++def _png(shade=200, size=20) -> bytes:
++    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, size, size), False)
++    pix.set_rect(pix.irect, (shade, shade, shade))
++    return pix.tobytes("png")
++
++
++# ----------------------------------------------------------------------------
++# the library itself
++# ----------------------------------------------------------------------------
++def test_pymupdf_version_supports_the_new_import_name():
++    major, minor, patch = (int(x) for x in pymupdf.__version__.split(".")[:3])
++    assert (major, minor, patch) >= (1, 24, 3)       # `import pymupdf` was introduced in 1.24.3
++    for name in ("open", "Rect", "csRGB", "Document", "Page"):
++        assert hasattr(pymupdf, name), name
++
++
++def test_requirements_pin_a_version_that_has_the_new_name():
++    line = next(l for l in (ROOT / "requirements.txt").read_text().splitlines() if l.lower().startswith("pymupdf>="))
++    assert line.strip() >= "pymupdf>=1.24.3"
++
++
++# ----------------------------------------------------------------------------
++# static: nothing in the app still imports or uses the old module name
++# ----------------------------------------------------------------------------
++def _app_py_files():
++    skip = {"tests", ".venv", "venv", "__pycache__", "scratch", "chroma_data", "node_modules"}
++    for p in ROOT.rglob("*.py"):
++        if not skip.intersection(p.relative_to(ROOT).parts):
++            yield p
++
++
++def test_no_app_module_imports_or_references_fitz():
++    offenders = []
++    for path in _app_py_files():
++        tree = ast.parse(path.read_text(encoding="utf-8"))
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "fitz" for a in node.names):
++                offenders.append(f"{path.name}:{node.lineno} import fitz")
++            elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "fitz":
++                offenders.append(f"{path.name}:{node.lineno} from fitz")
++            elif isinstance(node, ast.Name) and node.id == "fitz":
++                offenders.append(f"{path.name}:{node.lineno} name fitz")
++    assert offenders == []
++
++
++def test_router_module_exposes_pymupdf_for_patching():
++    import parsers.pdf_router as r
++    assert r.pymupdf is pymupdf and not hasattr(r, "fitz")
++
++
++# ----------------------------------------------------------------------------
++# pdf_cellmarks: real pages, values the silent fallbacks cannot return
++# ----------------------------------------------------------------------------
++def _colour_page():
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=300, height=200)
++    page.draw_rect(pymupdf.Rect(20, 20, 60, 60), color=None, fill=(0.0, 0.7, 0.1))     # green
++    page.draw_rect(pymupdf.Rect(120, 20, 160, 60), color=None, fill=(0.8, 0.1, 0.1))   # red
++    page.insert_text((20, 120), "Hello cell", fontsize=12)
++    page.insert_text((200, 40), "= available", fontsize=10)
++    return page
++
++
++def test_is_greenish_distinguishes_green_from_red():
++    page = _colour_page()
++    assert cm._is_greenish(page, 20, 20, 60, 60) is True
++    assert cm._is_greenish(page, 120, 20, 160, 60) is False       # fallback would return True
++
++
++def test_is_tick_colour_needs_mostly_green_ink():
++    page = _colour_page()
++    assert cm._is_tick_colour(page, 20, 20, 60, 60) is True       # fallback would return False
++    assert cm._is_tick_colour(page, 120, 20, 160, 60) is False
++
++
++def test_ocr_cell_reads_the_text_layer_of_the_clip():
++    page = _colour_page()
++    assert cm._ocr_cell(page, 10, 105, 120, 130) == "Hello cell"  # fallback would return ""
++
++
++def test_legend_swatch_detects_the_equals_key_to_the_right():
++    page = _colour_page()
++    # swatch box ends at x=190; the word "=" starts right after it
++    pdf = pymupdf.open()
++    p2 = pdf.new_page(width=300, height=200)
++    p2.insert_text((150, 60), "= available", fontsize=10)
++    assert cm._is_legend_swatch(p2, (120, 40, 148, 64)) is True    # fallback would return False
++    assert cm._is_legend_swatch(page, (120, 20, 160, 60)) is False
++
++
++# ----------------------------------------------------------------------------
++# pdf_router: real documents
++# ----------------------------------------------------------------------------
++def _three_page_pdf():
++    pdf = pymupdf.open()
++    for n in (1, 2, 3):
++        body = f"Page {n} marker. " + "This is a body paragraph with several sentences. " * 6
++        pdf.new_page(width=595, height=842).insert_textbox(pymupdf.Rect(72, 300, 520, 600), body, fontsize=11)
++    return pdf
++
++
++def test_single_page_bytes_extracts_exactly_that_page():
++    data = PdfPageRouter._single_page_bytes(_three_page_pdf(), 1)
++    out = pymupdf.open(stream=data, filetype="pdf")
++    assert out.page_count == 1 and "Page 2 marker" in out[0].get_text()
++
++
++def test_triage_text_image_and_table_pages():
++    router = PdfPageRouter()
++    pdf = pymupdf.open()
++    text = pdf.new_page(width=595, height=842)
++    text.insert_textbox(pymupdf.Rect(40, 40, 550, 800), "plain paragraph of text. " * 80, fontsize=10)
++    assert router._triage_page(text) == ["text"]
++
++    img = pdf.new_page(width=595, height=842)
++    img.insert_image(pymupdf.Rect(100, 200, 400, 420), stream=_png())
++    img.insert_text((50, 60), "tiny caption", fontsize=9)
++    assert "image" in router._triage_page(img)
++
++    grid = pdf.new_page(width=595, height=842)
++    for i in range(4):                                  # a ruled 3x3 grid with text in each cell
++        grid.draw_line((50, 100 + i * 40), (350, 100 + i * 40))
++        grid.draw_line((50 + i * 100, 100), (50 + i * 100, 220))
++    for r in range(3):
++        for c in range(3):
++            grid.insert_text((58 + c * 100, 125 + r * 40), f"r{r}c{c}", fontsize=9)
++    assert "table" in router._triage_page(grid)
++
++
++def test_page_markdown_uses_pymupdf4llm_on_a_real_page():
++    md = PdfPageRouter._page_markdown(_three_page_pdf(), 2, use_ocr=False)
++    assert "Page 3 marker" in md and "Page 1 marker" not in md

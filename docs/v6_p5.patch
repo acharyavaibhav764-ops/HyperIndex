@@ -1,0 +1,399 @@
+diff --git a/config.py b/config.py
+index 9f067c9..aa17b46 100644
+--- a/config.py
++++ b/config.py
+@@ -117,6 +117,10 @@ class Settings:
+     pdf_vlm_max_per_doc: int = int(os.getenv("PDF_VLM_MAX_PER_DOC", "40"))
+     # Per-request unload time: compose runs Ollama with OLLAMA_KEEP_ALIVE=-1 (models never unload).
+     pdf_vlm_keep_alive: str = os.getenv("PDF_VLM_KEEP_ALIVE", "5m")
++
++    # v6 phase 5: upload each figure crop to MinIO (needs the minio service) and link it in chunk metadata.
++    pdf_figure_store: bool = os.getenv("PDF_FIGURE_STORE", "false").lower() == "true"
++    pdf_figure_store_prefix: str = os.getenv("PDF_FIGURE_STORE_PREFIX", "figures")
+     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
+ 
+     # v5.9 thresholds
+diff --git a/core/chunker.py b/core/chunker.py
+index 1477f40..8598e54 100644
+--- a/core/chunker.py
++++ b/core/chunker.py
+@@ -27,6 +27,28 @@ from core.chunk_cleanup import (  # v5.8 / v5.9.1
+ # v6: Figure cards written by parsers/pdf_v6/cards.py.
+ _FIGURE_CARD_RE = re.compile(r"(?m)^Figure: .*? \| (?:Type|Section|Labels):")
+ _PROCEDURE_RE = re.compile(r"(?m)^Procedure \(\d+ illustrated steps\)")  # v6 phase 3
++# v6 phase 5: trailing " | Page: n | BBox: ... | Image: s3://..." that cards.format_tail appends.
++_FIG_TAIL_RE = re.compile(r" \| Page: (\d+)(?: \| BBox: ([\d.,-]+))?(?: \| Image: (\S+))?\s*$")
++
++
++def _split_figure_tail(text: str) -> tuple[str, dict[str, Any]]:
++    """Move a card's Page/BBox/Image tail out of the embedded text into metadata."""
++    meta: dict[str, Any] = {}
++    lines = text.split("\n")
++    for i, line in enumerate(lines):
++        if not (line.startswith("Figure: ") or line.startswith("Procedure (")):
++            continue
++        m = _FIG_TAIL_RE.search(line)
++        if not m:
++            continue
++        lines[i] = line[:m.start()]
++        meta["figure_page"] = int(m.group(1))
++        if m.group(2):
++            meta["figure_bbox"] = m.group(2)
++        if m.group(3):
++            meta["figure_image"] = m.group(3)
++        break
++    return "\n".join(lines), meta
+ 
+ 
+ def _flatten_meta(meta: dict[str, Any]) -> dict[str, Any]:
+@@ -316,6 +338,9 @@ class Chunker:
+                 except Exception:
+                     pass
+ 
++            fig_meta: dict[str, Any] = {}
++            if content_type in ("figure", "procedure"):
++                text, fig_meta = _split_figure_tail(text)
+             meta: dict[str, Any] = {
+                 "document_id": file_id,
+                 "file_id": file_id,
+@@ -329,6 +354,7 @@ class Chunker:
+                 "section_id": section_id(page, heading_list),
+                 **doc_meta,
+             }
++            meta.update(fig_meta)
+             if is_picture_chunk:
+                 meta["source"] = "image_description"
+ 
+diff --git a/parsers/pdf_router.py b/parsers/pdf_router.py
+index 2965194..afad9a0 100644
+--- a/parsers/pdf_router.py
++++ b/parsers/pdf_router.py
+@@ -569,6 +569,11 @@ class PdfPageRouter(BaseParser):
+         if settings.pdf_figure_pipeline == "v6":
+             try:
+                 self._fig_run = v6_cards.FigureRun.from_pdf(pdf, settings.pdf_figure_repeat_min_pages)
++                if settings.pdf_figure_store:  # crops -> MinIO, keyed by file content
++                    import hashlib
++                    from .pdf_v6.store import FigureStore
++                    self._fig_run.doc_key = hashlib.sha1(file_bytes).hexdigest()[:16]
++                    self._fig_run.store = FigureStore.from_settings(settings)
+             except Exception as exc:
+                 logger.warning("pdf_v6: run setup failed: %s", exc)
+ 
+diff --git a/parsers/pdf_v6/cards.py b/parsers/pdf_v6/cards.py
+index e52c8bf..abff95f 100644
+--- a/parsers/pdf_v6/cards.py
++++ b/parsers/pdf_v6/cards.py
+@@ -33,6 +33,8 @@ class FigureRun:
+     repeated: set = field(default_factory=set)
+     stats: dict = field(default_factory=dict)
+     vlm_calls: int = 0
++    doc_key: str = ""          # stable per-file key (sha1 prefix) for figure object names
++    store: object = None       # FigureStore (MinIO) or None
+ 
+     def note(self, key: str) -> None:
+         self.stats[key] = self.stats.get(key, 0) + 1
+@@ -88,6 +90,16 @@ def format_card(caption: str, kind: str, section: str, labels: list[str],
+     return " | ".join(parts)
+ 
+ 
++def format_tail(page_no: int, bbox, url: str) -> str:
++    """Trailing ' | Page: n | BBox: x0,y0,x1,y1 | Image: s3://...' (the chunker moves it to metadata)."""
++    parts = [f"Page: {page_no + 1}"]
++    if bbox:
++        parts.append("BBox: " + ",".join(f"{v:.0f}" for v in bbox))
++    if url:
++        parts.append(f"Image: {url}")
++    return " | " + " | ".join(parts)
++
++
+ def format_procedure(steps: list[str], section: str) -> str:
+     parts = [f"Procedure ({len(steps)} illustrated steps)"]
+     if section:
+@@ -159,8 +171,10 @@ def process_pictures(
+         steps = procedure.build_procedure(page, [c["bbox"] for c in panels]) if len(panels) >= 3 else None
+         if steps:
+             consumed = {c["idx"] for c in panels}
++            proc_text = format_procedure(steps, section)
++            proc_text += format_tail(page_no, None, "")
+             cards.append({
+-                "figure_id": f"proc_p{page_no}", "text": format_procedure(steps, section),
++                "figure_id": f"proc_p{page_no}", "text": proc_text,
+                 "content_type": "procedure", "class_hint": "procedure",
+                 "confidence": "high", "source": "text_layer", "page": page_no,
+             })
+@@ -223,11 +237,23 @@ def process_pictures(
+ 
+         conf = "high" if source == "text_layer" and len(labels) >= lbl.MIN_LABELS_FOR_CARD else (
+             "medium" if source == "ocr" else "low")
++        card_text = format_card(caption, cls, section, labels, connections)
++        url = ""
++        if run.store is not None and run.doc_key:
++            try:
++                png = png or ocr.render_crop(page, bbox, int(getattr(st, "pdf_figure_render_dpi", 200)))
++                url = run.store.put(run.doc_key, c["figure_id"], png)
++                run.note("figure_stored")
++            except Exception as exc:
++                run.note("figure_store_failed")
++                logger.warning("pdf_v6: %s crop upload failed: %s", c["figure_id"], exc)
++        card_text += format_tail(page_no, bbox, url)
+         cards.append({
+             "figure_id": c["figure_id"],
+-            "text": format_card(caption, cls, section, labels, connections),
++            "text": card_text,
+             "content_type": "figure", "class_hint": cls, "confidence": conf,
+             "source": source, "edges": len(connections), "page": page_no,
++            "bbox": bbox, "image": url,
+         })
+         run.note("card")
+ 
+diff --git a/parsers/pdf_v6/store.py b/parsers/pdf_v6/store.py
+new file mode 100644
+index 0000000..1520e4e
+--- /dev/null
++++ b/parsers/pdf_v6/store.py
+@@ -0,0 +1,38 @@
++"""Figure crops in MinIO.
++
++Object names are derived from the *file content* (sha1 prefix), not from the upload's doc id,
++because the parser runs before the id is known and the API layer stays untouched.  Same file ->
++same keys -> re-ingesting overwrites instead of duplicating.  Chunks carry the ``s3://`` URL in
++metadata (``figure_image``); presign it in the answer layer when the image should be shown.
++"""
++from __future__ import annotations
++
++
++class FigureStore:
++    def __init__(self, client, bucket: str, prefix: str = "figures") -> None:
++        self.client = client
++        self.bucket = bucket
++        self.prefix = prefix.strip("/")
++
++    @classmethod
++    def from_settings(cls, settings) -> "FigureStore":
++        """Same MinIO endpoint/credentials as ``core.uploader.Uploader``."""
++        import boto3  # deferred: the parser must import without boto3 configured
++
++        client = boto3.client(
++            "s3",
++            endpoint_url=f"http://{settings.minio_endpoint}",
++            aws_access_key_id=settings.minio_access_key,
++            aws_secret_access_key=settings.minio_secret_key,
++            region_name="us-east-1",
++        )
++        return cls(client, settings.minio_bucket, getattr(settings, "pdf_figure_store_prefix", "figures"))
++
++    def key(self, doc_key: str, figure_id: str) -> str:
++        return f"{self.prefix}/{doc_key}/{figure_id}.png"
++
++    def put(self, doc_key: str, figure_id: str, png: bytes) -> str:
++        """Upload one crop; returns its ``s3://bucket/key`` URL (raises on failure)."""
++        key = self.key(doc_key, figure_id)
++        self.client.put_object(Bucket=self.bucket, Key=key, Body=png, ContentType="image/png")
++        return f"s3://{self.bucket}/{key}"
+diff --git a/tests/parsing_arch/v6/test_p2_figure_cards.py b/tests/parsing_arch/v6/test_p2_figure_cards.py
+index a6ae34d..b94d8f6 100644
+--- a/tests/parsing_arch/v6/test_p2_figure_cards.py
++++ b/tests/parsing_arch/v6/test_p2_figure_cards.py
+@@ -156,7 +156,7 @@ def test_diagram_card_uses_text_layer_labels():
+     assert card["content_type"] == "figure" and card["confidence"] == "high" and card["source"] == "text_layer"
+     assert card["figure_id"] == "fig_p4_0"
+     assert card["text"].startswith("Figure: (untitled) | Type: engineering drawing | Section: 5.6 Room wiring | Labels: ")
+-    assert "SEM-IP ID1" in card["text"] and "SCU ID2" in card["text"] and card["text"].endswith("| Numbers: 1")
++    assert "SEM-IP ID1" in card["text"] and "SCU ID2" in card["text"] and "| Numbers: 1" in card["text"]
+ 
+ 
+ def test_product_photo_without_text_gets_no_card_and_is_counted():
+diff --git a/tests/parsing_arch/v6/test_p5_store.py b/tests/parsing_arch/v6/test_p5_store.py
+new file mode 100644
+index 0000000..066b41a
+--- /dev/null
++++ b/tests/parsing_arch/v6/test_p5_store.py
+@@ -0,0 +1,187 @@
++"""v6 phase 5: typed chunks with page / bbox / MinIO image link in metadata."""
++import sys
++import types
++from unittest.mock import MagicMock
++
++import pymupdf
++import pytest
++from docling_core.types.doc import BoundingBox, CoordOrigin, DoclingDocument, ProvenanceItem, Size
++from docling_core.types.doc.document import (
++    PictureClassificationMetaField, PictureClassificationPrediction, PictureMeta,
++)
++
++from core.chunker import _split_figure_tail
++from parsers.pdf_v6 import cards
++from parsers.pdf_v6.store import FigureStore
++
++H = 842.0
++LABELS = [(120, 230, "SEM-IP ID1"), (120, 250, "DBUS 1"), (120, 270, "SBU ID1"), (120, 290, "SCU ID2")]
++RECT = (100, 200, 400, 420)
++
++
++def _png(shade=200, size=20) -> bytes:
++    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, size, size), False)
++    pix.set_rect(pix.irect, (shade, shade, shade))
++    return pix.tobytes("png")
++
++
++def _page(texts=(), images=()):
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=595, height=H)
++    for x, y, s in texts:
++        page.insert_text((x, y), s, fontsize=8)
++    for im in images:
++        page.insert_image(pymupdf.Rect(*im[:4]), stream=_png(im[4] if len(im) > 4 else 200))
++    return pdf, page
++
++
++def _doc(rects=(RECT,)):
++    doc = DoclingDocument(name="t")
++    doc.add_page(page_no=1, size=Size(width=595, height=H))
++    for r in rects:
++        pic = doc.add_picture(prov=ProvenanceItem(page_no=1, bbox=BoundingBox(
++            l=r[0], t=H - r[1], r=r[2], b=H - r[3], coord_origin=CoordOrigin.BOTTOMLEFT), charspan=(0, 0)))
++        pic.meta = PictureMeta(classification=PictureClassificationMetaField(predictions=[
++            PictureClassificationPrediction(class_name="engineering_drawing", confidence=0.9, created_by="t")]))
++    return doc
++
++
++class FakeS3:
++    def __init__(self, fail=False):
++        self.objects, self.fail = {}, fail
++
++    def put_object(self, Bucket, Key, Body, ContentType):
++        if self.fail:
++            raise RuntimeError("minio down")
++        self.objects[(Bucket, Key)] = (Body, ContentType)
++
++
++# ----------------------------------------------------------------------------
++# store
++# ----------------------------------------------------------------------------
++def test_store_keys_are_content_derived_and_idempotent():
++    s3 = FakeS3()
++    store = FigureStore(s3, "honeywell-files", "/figures/")
++    url = store.put("abc123", "fig_p4_0", b"PNG1")
++    assert url == "s3://honeywell-files/figures/abc123/fig_p4_0.png"
++    assert store.put("abc123", "fig_p4_0", b"PNG2") == url             # same key -> overwrite, not duplicate
++    assert s3.objects == {("honeywell-files", "figures/abc123/fig_p4_0.png"): (b"PNG2", "image/png")}
++
++
++def test_store_from_settings_uses_the_uploaders_minio_config(monkeypatch):
++    fake_boto = types.SimpleNamespace(client=MagicMock(return_value="client"))
++    monkeypatch.setitem(sys.modules, "boto3", fake_boto)
++    from config import settings
++    store = FigureStore.from_settings(settings)
++    kw = fake_boto.client.call_args.kwargs
++    assert fake_boto.client.call_args.args == ("s3",)
++    assert kw["endpoint_url"] == f"http://{settings.minio_endpoint}" and kw["region_name"] == "us-east-1"
++    assert kw["aws_access_key_id"] == settings.minio_access_key
++    assert store.client == "client" and store.bucket == settings.minio_bucket and store.prefix == "figures"
++
++
++# ----------------------------------------------------------------------------
++# cards
++# ----------------------------------------------------------------------------
++def test_figure_card_carries_page_and_bbox_without_a_store():
++    _, page = _page(texts=LABELS, images=[(*RECT, 180)])
++    [card] = cards.process_pictures(_doc(), page, ["Wiring"], 4)           # page_no is 0-based
++    assert card["text"].endswith(" | Page: 5 | BBox: 100,200,400,420")
++    assert card["bbox"] == pytest.approx(RECT) and card["image"] == ""
++
++
++def test_crop_is_uploaded_and_linked_when_a_store_is_configured():
++    s3 = FakeS3()
++    run = cards.FigureRun()
++    run.doc_key, run.store = "deadbeef", FigureStore(s3, "honeywell-files")
++    _, page = _page(texts=LABELS, images=[(*RECT, 180)])
++    [card] = cards.process_pictures(_doc(), page, [], 4, run=run)
++    key = ("honeywell-files", "figures/deadbeef/fig_p4_0.png")
++    assert card["image"] == "s3://honeywell-files/figures/deadbeef/fig_p4_0.png"
++    assert card["text"].endswith(f" | Page: 5 | BBox: 100,200,400,420 | Image: {card['image']}")
++    body, ctype = s3.objects[key]
++    assert body[:4] == b"\x89PNG" and ctype == "image/png" and run.stats["figure_stored"] == 1
++
++
++def test_upload_failure_keeps_the_card_without_an_image_link():
++    run = cards.FigureRun()
++    run.doc_key, run.store = "deadbeef", FigureStore(FakeS3(fail=True), "b")
++    _, page = _page(texts=LABELS, images=[(*RECT, 180)])
++    [card] = cards.process_pictures(_doc(), page, [], 4, run=run)
++    assert card["image"] == "" and "Image:" not in card["text"] and run.stats["figure_store_failed"] == 1
++    assert "Labels: SEM-IP ID1" in card["text"]
++
++
++def test_procedure_card_gets_a_page_tail():
++    panels = [(60, 100, 260, 230), (320, 100, 520, 230), (60, 300, 260, 430)]
++    steps = ["Reinsert the PCB and latch in place.", "Insert the connecting cables and mark them.",
++             "Plug in the connection cable before attaching the housing."]
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=595, height=H)
++    for i, r in enumerate(panels):
++        page.insert_image(pymupdf.Rect(*r), stream=_png(150 + i * 10))
++        page.insert_textbox(pymupdf.Rect(r[0], r[3] + 6, r[2], r[3] + 60), steps[i], fontsize=9)
++    [card] = cards.process_pictures(_doc(panels), page, ["Installation"], 6)
++    assert card["content_type"] == "procedure"
++    assert card["text"].endswith("Step 3: Plug in the connection cable before attaching the housing. | Page: 7")
++
++
++# ----------------------------------------------------------------------------
++# chunker: tail -> metadata
++# ----------------------------------------------------------------------------
++def test_split_figure_tail_moves_page_bbox_image_into_metadata():
++    line = "Figure: (untitled) | Type: engineering drawing | Labels: a, b, c | Page: 5 | BBox: 100,200,400,420 | Image: s3://b/figures/k/fig_p4_0.png"
++    text, meta = _split_figure_tail("5.6 Room wiring\n" + line + "\nother text")
++    assert text == "5.6 Room wiring\nFigure: (untitled) | Type: engineering drawing | Labels: a, b, c\nother text"
++    assert meta == {"figure_page": 5, "figure_bbox": "100,200,400,420", "figure_image": "s3://b/figures/k/fig_p4_0.png"}
++
++
++def test_split_figure_tail_handles_page_only_and_non_cards():
++    text, meta = _split_figure_tail("Procedure (3 illustrated steps) | Step 1: a b c | Page: 2")
++    assert text == "Procedure (3 illustrated steps) | Step 1: a b c" and meta == {"figure_page": 2}
++    plain = "Normal paragraph | Page: 7"
++    assert _split_figure_tail(plain) == (plain, {})                         # only cards are touched
++
++
++def test_metadata_values_are_chroma_safe_scalars():
++    _, meta = _split_figure_tail("Figure: x | Labels: a | Page: 3 | BBox: 1,2,3,4 | Image: s3://b/k.png")
++    assert all(isinstance(v, (str, int, float, bool)) for v in meta.values())
++
++
++# ----------------------------------------------------------------------------
++# router wiring
++# ----------------------------------------------------------------------------
++def test_parse_wires_the_store_and_a_content_key_into_the_run(monkeypatch):
++    import hashlib
++    import dataclasses as dc
++    from config import settings
++    import parsers.pdf_router as pr
++
++    monkeypatch.setattr(pr, "settings", dc.replace(
++        settings, enable_pdf_page_router=True, pdf_figure_pipeline="v6", pdf_figure_store=True))
++    fake = FakeS3()
++    monkeypatch.setattr(FigureStore, "from_settings", classmethod(lambda cls, st: cls(fake, "b")))
++    pdf = pymupdf.open()
++    pdf.new_page(width=595, height=842).insert_textbox(
++        pymupdf.Rect(72, 300, 520, 600), "Body paragraph with several sentences. " * 8, fontsize=11)
++    data = pdf.tobytes()
++    router = pr.PdfPageRouter()
++    router._merge_pages = MagicMock(return_value="merged")
++    assert router.parse(data, "m.pdf") == "merged"
++    assert router._fig_run.doc_key == hashlib.sha1(data).hexdigest()[:16]
++    assert router._fig_run.store.bucket == "b"
++
++
++def test_parse_leaves_the_run_without_a_store_by_default(monkeypatch):
++    import dataclasses as dc
++    from config import settings
++    import parsers.pdf_router as pr
++
++    monkeypatch.setattr(pr, "settings", dc.replace(settings, enable_pdf_page_router=True, pdf_figure_pipeline="v6"))
++    pdf = pymupdf.open()
++    pdf.new_page(width=595, height=842).insert_textbox(
++        pymupdf.Rect(72, 300, 520, 600), "Body paragraph with several sentences. " * 8, fontsize=11)
++    router = pr.PdfPageRouter()
++    router._merge_pages = MagicMock(return_value="merged")
++    router.parse(pdf.tobytes(), "m.pdf")
++    assert router._fig_run.store is None and router._fig_run.doc_key == ""

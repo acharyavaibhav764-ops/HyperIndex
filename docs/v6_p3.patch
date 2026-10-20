@@ -1,0 +1,345 @@
+diff --git a/config.py b/config.py
+index d36dcf5..c51c963 100644
+--- a/config.py
++++ b/config.py
+@@ -104,6 +104,9 @@ class Settings:
+     # Technical tokens that rescue a diagram the classifier called photo/logo/icon.
+     # Empty = built-in Honeywell nurse-call tokens (see parsers/pdf_v6/labels.py).
+     pdf_figure_tech_regex: str = os.getenv("PDF_FIGURE_TECH_REGEX", "")
++
++    # v6 phase 3: step-by-step illustration pages -> one ordered Procedure chunk.
++    pdf_figure_procedures: bool = os.getenv("PDF_FIGURE_PROCEDURES", "true").lower() == "true"
+     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
+ 
+     # v5.9 thresholds
+diff --git a/core/chunker.py b/core/chunker.py
+index 9072d30..1477f40 100644
+--- a/core/chunker.py
++++ b/core/chunker.py
+@@ -26,6 +26,7 @@ from core.chunk_cleanup import (  # v5.8 / v5.9.1
+ 
+ # v6: Figure cards written by parsers/pdf_v6/cards.py.
+ _FIGURE_CARD_RE = re.compile(r"(?m)^Figure: .*? \| (?:Type|Section|Labels):")
++_PROCEDURE_RE = re.compile(r"(?m)^Procedure \(\d+ illustrated steps\)")  # v6 phase 3
+ 
+ 
+ def _flatten_meta(meta: dict[str, Any]) -> dict[str, Any]:
+@@ -297,6 +298,8 @@ class Chunker:
+                 content_type = "toc"
+             elif "[Recovered text]" in text:
+                 content_type = "recovered_text"
++            elif _PROCEDURE_RE.search(text):
++                content_type = "procedure"
+             elif text.startswith("Figure:") or _FIGURE_CARD_RE.search(text) or is_picture_chunk:
+                 content_type = "figure"
+             else:
+diff --git a/parsers/pdf_v6/cards.py b/parsers/pdf_v6/cards.py
+index ac6e281..bbcfdbf 100644
+--- a/parsers/pdf_v6/cards.py
++++ b/parsers/pdf_v6/cards.py
+@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
+ from . import gate, geometry
+ from . import labels as lbl
+ from . import text as txt
++from . import procedure
+ 
+ if TYPE_CHECKING:  # pragma: no cover
+     from docling_core.types.doc import DoclingDocument
+@@ -85,6 +86,14 @@ def format_card(caption: str, kind: str, section: str, labels: list[str],
+     return " | ".join(parts)
+ 
+ 
++def format_procedure(steps: list[str], section: str) -> str:
++    parts = [f"Procedure ({len(steps)} illustrated steps)"]
++    if section:
++        parts.append(f"Section: {section}")
++    parts.extend(f"Step {i}: {s}" for i, s in enumerate(steps, 1))
++    return " | ".join(parts)
++
++
+ def process_pictures(
+     doc: "DoclingDocument",
+     page,
+@@ -140,6 +149,20 @@ def process_pictures(
+     cards: list[dict] = []
+     consumed: set[int] = set()
+ 
++    # ---- procedure: 3+ similar, label-poor, non-technical panels with captions beneath
++    if getattr(st, "pdf_figure_procedures", True):
++        panels = [c for c in cands
++                  if not c["tech"] and len(c["labels"]) < lbl.MIN_LABELS_FOR_CARD
++                  and c["cls"] not in gate.CHART_CLASSES]
++        steps = procedure.build_procedure(page, [c["bbox"] for c in panels]) if len(panels) >= 3 else None
++        if steps:
++            consumed = {c["idx"] for c in panels}
++            cards.append({
++                "figure_id": f"proc_p{page_no}", "text": format_procedure(steps, section),
++                "content_type": "procedure", "class_hint": "procedure",
++                "confidence": "high", "source": "text_layer", "page": page_no,
++            })
++            run.note("procedure")
+ 
+     # ---- figure cards
+     for c in cands:
+diff --git a/parsers/pdf_v6/procedure.py b/parsers/pdf_v6/procedure.py
+new file mode 100644
+index 0000000..436382e
+--- /dev/null
++++ b/parsers/pdf_v6/procedure.py
+@@ -0,0 +1,101 @@
++"""Step-by-step illustration pages -> ONE ordered Procedure chunk.
++
++A page of 3+ similar line-art panels with a short sentence under each is a procedure
++("Reinsert the PCB...", "Plug in the connection cable...").  The sentences are live text that
++Docling already extracts, but as unrelated short paragraphs: nothing tells retrieval they are
++steps 1..N of one task.  So the panels get no per-image captions; the page gets one chunk.
++"""
++from __future__ import annotations
++
++import re
++
++from .geometry import inside
++
++MAX_PANELS = 12
++MAX_CAPTION_CHARS = 220
++_FIG_CAPTION_RE = re.compile(r"^(fig\.?|figure|table|abb\.?|bild)\s*\d", re.I)
++
++
++def _row_major(panels: list[dict]) -> list[dict]:
++    """Reading order of a panel grid: rows top to bottom, left to right within a row."""
++    if not panels:
++        return panels
++    hs = sorted(p["bbox"][3] - p["bbox"][1] for p in panels)
++    tol = max(hs[len(hs) // 2] * 0.5, 10.0)
++    rows: list[list[dict]] = []
++    for p in sorted(panels, key=lambda p: p["bbox"][1]):
++        if rows and abs(p["bbox"][1] - rows[-1][0]["bbox"][1]) <= tol:
++            rows[-1].append(p)
++        else:
++            rows.append([p])
++    return [p for row in rows for p in sorted(row, key=lambda p: p["bbox"][0])]
++
++
++def text_lines(page) -> list[tuple]:
++    """[(text, (x0, y0, x1, y1))] for every text line on the page (PyMuPDF 'dict' lines).
++
++    Lines, not blocks: PyMuPDF happily merges two captions that sit side by side on the same
++    baseline into one block, which would glue two steps together.
++    """
++    out = []
++    try:
++        for blk in page.get_text("dict").get("blocks", []):
++            if blk.get("type") != 0:
++                continue
++            for ln in blk.get("lines", []):
++                text = "".join(sp.get("text", "") for sp in ln.get("spans", [])).strip()
++                if text:
++                    out.append((text, tuple(ln["bbox"])))
++    except Exception:
++        return []
++    return out
++
++
++def build_procedure(page, bboxes: list[tuple], max_gap: float = 90.0) -> list[str] | None:
++    """Ordered step captions for a page of illustrated panels, or None when it does not look
++    like a procedure.  A caption is the 1-4 text lines directly under a panel."""
++    if len(bboxes) < 3 or len(bboxes) > MAX_PANELS:
++        return None
++    areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in bboxes]
++    if max(areas) / max(min(areas), 1.0) > 8:
++        return None
++    lines = text_lines(page)
++    if not lines:
++        return None
++    panels = [{"bbox": b, "caption": ""} for b in bboxes]
++    used: set[int] = set()
++    for p in panels:
++        x0, y0, x1, y1 = p["bbox"]
++        cands = []
++        for i, (_, r) in enumerate(lines):
++            if i in used:
++                continue
++            cx = (r[0] + r[2]) / 2
++            gap = r[1] - y1
++            if gap < -4 or gap > max_gap or not (x0 - 5 <= cx <= x1 + 5):
++                continue
++            if any(inside(r, q["bbox"], 1.0) for q in panels):
++                continue
++            cands.append((r[1], i))
++        if not cands:
++            continue
++        cands.sort()
++        chosen = [cands[0][1]]
++        for _, i in cands[1:4]:
++            prev, cur = lines[chosen[-1]][1], lines[i][1]
++            if cur[1] - prev[3] <= max(6.0, 0.9 * (prev[3] - prev[1])):
++                chosen.append(i)
++            else:
++                break
++        used.update(chosen)
++        caption = re.sub(r"\s+", " ", " ".join(lines[i][0] for i in chosen)).strip()
++        if len(caption) <= MAX_CAPTION_CHARS:
++            p["caption"] = caption
++    caps = [p["caption"] for p in panels if p["caption"]]
++    if len(caps) < max(3, int(0.8 * len(panels) + 0.999)):
++        return None
++    if sum(1 for c in caps if _FIG_CAPTION_RE.match(c)) > len(caps) // 2:
++        return None  # figure captions ("Fig. 3 ..."), not steps
++    if sum(1 for c in caps if len(c.split()) >= 3) < len(caps) * 0.8:
++        return None
++    return [p["caption"] for p in _row_major(panels) if p["caption"]]
+diff --git a/tests/parsing_arch/v6/test_p3_procedure.py b/tests/parsing_arch/v6/test_p3_procedure.py
+new file mode 100644
+index 0000000..2f1489e
+--- /dev/null
++++ b/tests/parsing_arch/v6/test_p3_procedure.py
+@@ -0,0 +1,149 @@
++"""v6 phase 3: step-by-step illustration pages -> one ordered Procedure chunk."""
++import dataclasses
++
++import pymupdf
++import pytest
++from docling_core.types.doc import BoundingBox, CoordOrigin, DoclingDocument, ProvenanceItem, Size
++from docling_core.types.doc.document import (
++    PictureClassificationMetaField, PictureClassificationPrediction, PictureMeta,
++)
++
++from parsers.pdf_v6 import cards, procedure
++
++H = 842.0
++STEPS = [
++    "Reinsert the PCB and latch in place.",
++    "Insert the connecting cables and mark them with the enclosed labels.",
++    "Plug in the connection cable before attaching the front of the housing.",
++    "Hook the front part of the housing into the marked openings at the top.",
++    "Remove the protective film from the display.",
++]
++PANELS = [(60, 100, 260, 230), (320, 100, 520, 230), (60, 300, 260, 430), (320, 300, 520, 430), (60, 500, 260, 630)]
++
++
++def _png(shade=200, size=20) -> bytes:
++    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, size, size), False)
++    pix.set_rect(pix.irect, (shade, shade, shade))
++    return pix.tobytes("png")
++
++
++def _step_page(captions=STEPS, panels=PANELS):
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=595, height=H)
++    for i, r in enumerate(panels):
++        page.insert_image(pymupdf.Rect(*r), stream=_png(150 + i * 10))
++    for r, c in zip(panels, captions):
++        page.insert_textbox(pymupdf.Rect(r[0], r[3] + 6, r[2], r[3] + 60), c, fontsize=9)
++    return pdf, page
++
++
++def _doc(rects, cls=("engineering_drawing", 0.9)):
++    doc = DoclingDocument(name="t")
++    doc.add_page(page_no=1, size=Size(width=595, height=H))
++    for r in rects:
++        pic = doc.add_picture(prov=ProvenanceItem(page_no=1, bbox=BoundingBox(
++            l=r[0], t=H - r[1], r=r[2], b=H - r[3], coord_origin=CoordOrigin.BOTTOMLEFT), charspan=(0, 0)))
++        pic.meta = PictureMeta(classification=PictureClassificationMetaField(predictions=[
++            PictureClassificationPrediction(class_name=cls[0], confidence=cls[1], created_by="t")]))
++    return doc
++
++
++# ----------------------------------------------------------------------------
++# build_procedure
++# ----------------------------------------------------------------------------
++def test_steps_come_out_in_row_major_order_with_wrapped_captions_joined():
++    _, page = _step_page()
++    assert procedure.build_procedure(page, list(PANELS)) == STEPS        # step 3 wraps onto two lines
++
++
++def test_panel_order_is_independent_of_the_input_order():
++    _, page = _step_page()
++    assert procedure.build_procedure(page, list(reversed(PANELS))) == STEPS
++
++
++def test_figure_caption_grids_are_not_procedures():
++    _, page = _step_page(captions=[f"Fig. {i} Dimension drawing of the module" for i in range(1, 6)])
++    assert procedure.build_procedure(page, list(PANELS)) is None
++
++
++def test_needs_three_panels_and_captions_for_most_of_them():
++    _, page = _step_page()
++    assert procedure.build_procedure(page, list(PANELS[:2])) is None
++    _, page = _step_page(captions=STEPS[:2] + ["", "", ""])
++    assert procedure.build_procedure(page, list(PANELS)) is None
++
++
++def test_wildly_different_panel_sizes_or_no_text_are_rejected():
++    _, page = _step_page()
++    odd = [PANELS[0], PANELS[1], (60, 300, 70, 305)]                      # a 10x5 pt speck among panels
++    assert procedure.build_procedure(page, odd) is None
++    pdf = pymupdf.open()
++    empty = pdf.new_page(width=595, height=H)
++    assert procedure.build_procedure(empty, list(PANELS)) is None
++
++
++def test_two_side_by_side_captions_stay_separate_steps():
++    # PyMuPDF merges same-baseline captions into one *block*; line-level reading must not.
++    _, page = _step_page()
++    blocks = [b for b in page.get_text("blocks") if "Reinsert" in b[4]]
++    assert "Insert the connecting" in blocks[0][4]                        # the trap this module avoids
++    assert procedure.build_procedure(page, list(PANELS))[0] == STEPS[0]
++
++
++# ----------------------------------------------------------------------------
++# cards integration
++# ----------------------------------------------------------------------------
++def test_process_pictures_emits_one_procedure_card_not_five_captions():
++    _, page = _step_page()
++    cards_out = cards.process_pictures(_doc(PANELS), page, ["Systevo Room Terminal"], 3)
++    assert len(cards_out) == 1
++    c = cards_out[0]
++    assert c["content_type"] == "procedure" and c["figure_id"] == "proc_p3"
++    assert c["text"].startswith("Procedure (5 illustrated steps) | Section: Systevo Room Terminal")
++    assert "Step 1: Reinsert the PCB and latch in place." in c["text"]
++    assert "Step 5: Remove the protective film from the display." in c["text"]
++
++
++def test_procedure_detection_can_be_switched_off(monkeypatch):
++    import config
++    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, pdf_figure_procedures=False))
++    _, page = _step_page()
++    out = cards.process_pictures(_doc(PANELS), page, [], 3)
++    assert all(c["content_type"] != "procedure" for c in out)             # panels have no labels -> no cards
++
++
++def test_technical_diagrams_are_never_taken_for_step_panels():
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=595, height=H)
++    for i, r in enumerate(PANELS[:3]):
++        page.insert_image(pymupdf.Rect(*r), stream=_png(150 + i * 10))
++        page.insert_text((r[0] + 10, r[1] + 30), "SEM-IP ID1", fontsize=8)
++        page.insert_text((r[0] + 10, r[1] + 50), "DBUS 1", fontsize=8)
++        page.insert_text((r[0] + 10, r[1] + 70), "SBU ID1", fontsize=8)
++        page.insert_textbox(pymupdf.Rect(r[0], r[3] + 6, r[2], r[3] + 60), STEPS[i], fontsize=9)
++    out = cards.process_pictures(_doc(PANELS[:3]), page, [], 1)
++    assert [c["content_type"] for c in out] == ["figure"] * 3
++
++
++def test_format_procedure_and_chunker_tag():
++    assert cards.format_procedure(["a b c", "d e f"], "") == "Procedure (2 illustrated steps) | Step 1: a b c | Step 2: d e f"
++    from core.chunker import _PROCEDURE_RE
++    assert _PROCEDURE_RE.search("x\nProcedure (5 illustrated steps) | Step 1: y")
++    assert not _PROCEDURE_RE.search("Procedure for cleaning")
++
++
++def test_procedure_card_survives_the_router_markdown_glue(monkeypatch):
++    from config import settings
++    from parsers.pdf_router import PdfPageRouter
++    monkeypatch.setattr("parsers.pdf_router.settings", dataclasses.replace(settings, pdf_figure_pipeline="v6"))
++    pdf, _ = _step_page()
++    out = PdfPageRouter()._v6_cards_md(_doc(PANELS), pdf.tobytes(), 3, "## Installation\n\ntext")
++    assert out.startswith("Procedure (5 illustrated steps) | Section: Installation | Step 1: Reinsert")
++
++
++@pytest.mark.parametrize("n", [3, 4, 6])
++def test_other_panel_counts_work(n):
++    panels = PANELS[:n] if n <= 5 else PANELS + [(320, 500, 520, 630)]
++    caps = (STEPS + ["Fasten the cover with the two screws provided."])[:n]
++    _, page = _step_page(captions=caps, panels=panels)
++    assert procedure.build_procedure(page, list(panels)) == caps

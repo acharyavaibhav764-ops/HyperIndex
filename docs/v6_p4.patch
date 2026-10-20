@@ -1,0 +1,632 @@
+diff --git a/config.py b/config.py
+index c51c963..9f067c9 100644
+--- a/config.py
++++ b/config.py
+@@ -107,6 +107,16 @@ class Settings:
+ 
+     # v6 phase 3: step-by-step illustration pages -> one ordered Procedure chunk.
+     pdf_figure_procedures: bool = os.getenv("PDF_FIGURE_PROCEDURES", "true").lower() == "true"
++
++    # v6 phase 4: RapidOCR labels for diagrams without a text layer, and the Ollama VLM that reads
++    # connections. The VLM is OFF until the A/B on your gold figures says it is precise enough.
++    pdf_figure_ocr: bool = os.getenv("PDF_FIGURE_OCR", "false").lower() == "true"
++    pdf_figure_render_dpi: int = int(os.getenv("PDF_FIGURE_RENDER_DPI", "200"))
++    pdf_vlm_enabled: bool = os.getenv("PDF_VLM_ENABLED", "false").lower() == "true"
++    pdf_vlm_timeout: int = int(os.getenv("PDF_VLM_TIMEOUT", "120"))
++    pdf_vlm_max_per_doc: int = int(os.getenv("PDF_VLM_MAX_PER_DOC", "40"))
++    # Per-request unload time: compose runs Ollama with OLLAMA_KEEP_ALIVE=-1 (models never unload).
++    pdf_vlm_keep_alive: str = os.getenv("PDF_VLM_KEEP_ALIVE", "5m")
+     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
+ 
+     # v5.9 thresholds
+diff --git a/parsers/pdf_v6/cards.py b/parsers/pdf_v6/cards.py
+index bbcfdbf..e52c8bf 100644
+--- a/parsers/pdf_v6/cards.py
++++ b/parsers/pdf_v6/cards.py
+@@ -14,6 +14,7 @@ from . import gate, geometry
+ from . import labels as lbl
+ from . import text as txt
+ from . import procedure
++from . import ocr, vlm
+ 
+ if TYPE_CHECKING:  # pragma: no cover
+     from docling_core.types.doc import DoclingDocument
+@@ -31,6 +32,7 @@ class FigureRun:
+     """Per-document state shared across pages."""
+     repeated: set = field(default_factory=set)
+     stats: dict = field(default_factory=dict)
++    vlm_calls: int = 0
+ 
+     def note(self, key: str) -> None:
+         self.stats[key] = self.stats.get(key, 0) + 1
+@@ -170,6 +172,23 @@ def process_pictures(
+             continue
+         pic, bbox, cls, labels = c["pic"], c["bbox"], c["cls"], list(c["labels"])
+         source = "text_layer" if labels else "none"
++        png = None
++        wants_vlm = bool(getattr(st, "pdf_vlm_enabled", False))
++        use_ocr = wants_vlm or bool(getattr(st, "pdf_figure_ocr", False))
++        if use_ocr and len(labels) < lbl.MIN_LABELS_FOR_CARD and (cls in gate.DIAGRAM_CLASSES or c["tech"]):
++            try:
++                dpi = int(getattr(st, "pdf_figure_render_dpi", 200))
++                png = ocr.render_crop(page, bbox, dpi)
++                found = ocr.ocr_labels(png, px_per_pt=ocr.effective_dpi(bbox, dpi) / 72.0)
++                if len(found) > len(labels):
++                    labels, source = found, "ocr"
++                    c["tech"] = lbl.is_technical(labels, tech_re)
++            except Exception as exc:
++                logger.warning("pdf_v6: %s OCR failed: %s", c["figure_id"], exc)
++            reason = gate.class_skip(cls, c["tech"], len(labels))
++            if reason:
++                run.note(reason)
++                continue
+ 
+         caption = ""
+         try:
+@@ -181,6 +200,26 @@ def process_pictures(
+             continue
+ 
+         connections: list[dict] = []
++        max_vlm = int(getattr(st, "pdf_vlm_max_per_doc", 40))
++        if (wants_vlm and len(labels) >= lbl.MIN_LABELS_FOR_CARD
++                and (cls in gate.DIAGRAM_CLASSES or c["tech"]) and run.vlm_calls < max_vlm):
++            try:
++                png = png or ocr.render_crop(page, bbox, int(getattr(st, "pdf_figure_render_dpi", 200)))
++                run.vlm_calls += 1
++                raw = vlm.parse_vlm_json(vlm.chat(
++                    png, vlm.build_prompt(labels, section, caption),
++                    getattr(st, "pdf_vlm_model", "qwen2.5vl:3b"),
++                    st.ollama_host, st.ollama_port,
++                    int(getattr(st, "pdf_vlm_timeout", 120)),
++                    str(getattr(st, "pdf_vlm_keep_alive", "5m")),
++                ))
++                connections = vlm.validate_connections(raw, labels + ([caption] if caption else []))
++                run.note("vlm_edges_kept" if connections else "vlm_edges_none")
++                if raw and len(connections) < len(raw):
++                    run.note("vlm_edges_dropped")
++            except Exception as exc:
++                run.note("vlm_error")
++                logger.warning("pdf_v6: %s VLM read failed: %s", c["figure_id"], exc)
+ 
+         conf = "high" if source == "text_layer" and len(labels) >= lbl.MIN_LABELS_FOR_CARD else (
+             "medium" if source == "ocr" else "low")
+diff --git a/parsers/pdf_v6/ocr.py b/parsers/pdf_v6/ocr.py
+new file mode 100644
+index 0000000..3690210
+--- /dev/null
++++ b/parsers/pdf_v6/ocr.py
+@@ -0,0 +1,102 @@
++"""Optional OCR labels for diagrams that have no text layer (RapidOCR, imported lazily).
++
++Used only when PDF_FIGURE_OCR=true or the VLM is enabled.  OCR output is shaped like the PDF
++text layer so the same exact-match validation applies:
++  * a bare 'ID1' is paired with the nearest device label (OCR detects 'SEM-IP' and 'ID1' apart),
++  * compact 'DBUS2' also gets its spaced form 'DBUS 2' (OCR drops spaces between letters/digits).
++"""
++from __future__ import annotations
++
++import logging
++import re
++from typing import Any
++
++from .labels import MAX_LABEL_LINES, _id_composites
++from .text import dedup
++
++logger = logging.getLogger(__name__)
++
++MAX_SIDE_PX = 1600
++MIN_DPI = 96
++OCR_MIN_SCORE = 0.5
++ID_GAP_PT = 25.0
++
++_OCR_ENGINE: Any = None
++_OCR_FAILED = False
++_COMPACT_RE = re.compile(r"^([A-Za-z]{3,}(?:-[A-Za-z]+)?)(\d+)$")
++
++
++def effective_dpi(bbox, dpi: int = 200, max_side_px: int = MAX_SIDE_PX) -> int:
++    """Render DPI actually used for ``bbox``: capped so the long side stays <= ``max_side_px``."""
++    w = max(bbox[2] - bbox[0], 1.0)
++    h = max(bbox[3] - bbox[1], 1.0)
++    return max(MIN_DPI, min(int(dpi), int(max_side_px * 72 / max(w, h))))
++
++
++def render_crop(page, bbox, dpi: int = 200, max_side_px: int = MAX_SIDE_PX) -> bytes:
++    """PNG of ``bbox`` rendered from the page itself (vector diagrams included)."""
++    import pymupdf
++    pix = page.get_pixmap(clip=pymupdf.Rect(*bbox), dpi=effective_dpi(bbox, dpi, max_side_px))
++    return pix.tobytes("png")
++
++
++def spaced_variants(lines: list[str]) -> list[str]:
++    """'DBUS2' -> 'DBUS 2' (letters then digits).  'ID1' is left alone: it is already an address."""
++    out = []
++    for line in lines:
++        m = _COMPACT_RE.match(line.strip())
++        if m and not re.fullmatch(r"ID\d+", line.strip(), re.I):
++            out.append(f"{m.group(1)} {m.group(2)}")
++    return out
++
++
++def _items(res) -> list[tuple]:
++    """[(text, (x0, y0, x1, y1))] from either RapidOCR return shape."""
++    items = []
++    if hasattr(res, "txts"):                       # rapidocr >= 2
++        boxes = list(getattr(res, "boxes", None) if getattr(res, "boxes", None) is not None else [])
++        scores = list(getattr(res, "scores", None) if getattr(res, "scores", None) is not None else [])
++        for i, t in enumerate(res.txts or []):
++            if i < len(scores) and float(scores[i]) < OCR_MIN_SCORE:
++                continue
++            items.append((str(t), _rect(boxes[i]) if i < len(boxes) else None))
++        return items
++    result = res[0] if isinstance(res, tuple) else res        # rapidocr_onnxruntime
++    for r in result or []:
++        if len(r) >= 3 and float(r[2]) < OCR_MIN_SCORE:
++            continue
++        items.append((str(r[1]), _rect(r[0])))
++    return items
++
++
++def _rect(box):
++    try:
++        xs = [float(p[0]) for p in box]
++        ys = [float(p[1]) for p in box]
++        return (min(xs), min(ys), max(xs), max(ys))
++    except Exception:
++        return None
++
++
++def ocr_labels(png: bytes, px_per_pt: float = 1.0) -> list[str]:
++    """OCR text lines of a rendered crop, shaped like the PDF text layer ([] if RapidOCR is missing)."""
++    global _OCR_ENGINE, _OCR_FAILED
++    if _OCR_FAILED:
++        return []
++    try:
++        if _OCR_ENGINE is None:
++            try:
++                from rapidocr_onnxruntime import RapidOCR  # type: ignore
++            except ImportError:
++                from rapidocr import RapidOCR  # type: ignore
++            _OCR_ENGINE = RapidOCR()
++        items = [(t, r) for t, r in _items(_OCR_ENGINE(png)) if t.strip()]
++        items.sort(key=lambda it: ((it[1][1] // 12) if it[1] else 0, it[1][0] if it[1] else 0))
++        texts = [t for t, _ in items]
++        placed = [(t, r) for t, r in items if r]
++        composites = _id_composites(placed, max_gap=ID_GAP_PT * max(px_per_pt, 0.1))
++        return dedup(texts + spaced_variants(texts) + composites)[:MAX_LABEL_LINES]
++    except Exception as exc:  # pragma: no cover - depends on the optional package
++        _OCR_FAILED = True
++        logger.warning("pdf_v6: OCR unavailable (%s); text-layer labels only", exc)
++        return []
+diff --git a/parsers/pdf_v6/vlm.py b/parsers/pdf_v6/vlm.py
+new file mode 100644
+index 0000000..33bb4d5
+--- /dev/null
++++ b/parsers/pdf_v6/vlm.py
+@@ -0,0 +1,135 @@
++"""Local VLM (Ollama) reads connections; every connection must be provable from the figure's labels.
++
++The VLM never writes prose for the index.  It returns JSON connections, and a connection is kept
++only if both endpoints (and the bus name) are contiguous token runs inside ONE label line of the
++figure.  Exact match, no fuzzy matching: SBU ID1 / ID2 / ID3 and DBUS 1 / 2 differ by one
++character, and 'SBU' + 'ID2' taken from two different labels must not combine into a device
++that is not drawn.  Endpoints are kept as written, never rewritten to a neighbour.
++"""
++from __future__ import annotations
++
++import base64
++import json
++import re
++import urllib.request
++
++from .labels import MAX_LABEL_LINES
++from .text import norm, tokens
++
++
++def build_prompt(labels: list[str], heading: str, caption: str) -> str:
++    lines = "\n".join(f"- {label}" for label in labels[:MAX_LABEL_LINES])
++    return (
++        "You are reading one technical figure (wiring / system diagram) from a product manual.\n"
++        f"Section: {heading or 'unknown'}\n"
++        f"Caption: {caption or 'none'}\n"
++        "These are the ONLY text labels that exist in the figure:\n"
++        f"{lines}\n\n"
++        "List the drawn connections between labelled items. Reply with JSON only:\n"
++        '{"connections":[{"from":"<label>","to":"<label>","via":"<bus name or wire count>"}]}\n'
++        "Rules: copy labels exactly as written above; one entry per drawn line or arrow between two "
++        "labelled items; never invent a label; if a link is unclear leave it out; "
++        'if nothing is readable reply {"connections":[]}.'
++    )
++
++
++def chat(png: bytes, prompt: str, model: str, host: str, port, timeout: int, keep_alive: str = "5m") -> str:
++    """One image + prompt to Ollama ``/api/chat`` (JSON mode, temperature 0).
++
++    ``keep_alive`` matters: the Ollama service runs with OLLAMA_KEEP_ALIVE=-1 (models stay loaded
++    forever), so without a per-request value the vision model would stay resident next to the
++    answer model after ingestion.
++    """
++    base = host if "://" in host else f"http://{host}:{port}"
++    body = {
++        "model": model,
++        "stream": False,
++        "format": "json",
++        "keep_alive": keep_alive,
++        "options": {"temperature": 0, "num_predict": 700, "num_ctx": 4096},
++        "messages": [{"role": "user", "content": prompt,
++                      "images": [base64.b64encode(png).decode("ascii")]}],
++    }
++    req = urllib.request.Request(
++        base.rstrip("/") + "/api/chat",
++        data=json.dumps(body).encode("utf-8"),
++        headers={"Content-Type": "application/json"},
++    )
++    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local service
++        data = json.loads(resp.read().decode("utf-8"))
++    return str(data.get("message", {}).get("content", ""))
++
++
++def parse_vlm_json(text: str) -> list[dict]:
++    t = (text or "").strip()
++    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.I).strip()
++    obj = None
++    try:
++        obj = json.loads(t)
++    except Exception:
++        m = re.search(r"\{.*\}", t, re.S)
++        if m:
++            try:
++                obj = json.loads(m.group(0))
++            except Exception:
++                obj = None
++    if isinstance(obj, dict):
++        conns = obj.get("connections", obj.get("edges", []))
++    elif isinstance(obj, list):
++        conns = obj
++    else:
++        conns = []
++    return [c for c in conns if isinstance(c, dict)] if isinstance(conns, list) else []
++
++
++def line_tokens(lines: list[str]) -> list[list[str]]:
++    """Token lists, one per label line (the unit endpoints are validated against)."""
++    return [t for t in (tokens(line) for line in lines) if t]
++
++
++def _contains(seq: list[str], sub: list[str]) -> bool:
++    n = len(sub)
++    return n > 0 and any(seq[i:i + n] == sub for i in range(len(seq) - n + 1))
++
++
++def _covered(text: str, ltoks: list[list[str]]) -> bool:
++    toks = tokens(text)
++    return bool(toks) and any(_contains(lt, toks) for lt in ltoks)
++
++
++def _clean_via(via: str, ltoks: list[list[str]]) -> str:
++    keep = []
++    for part in re.split(r"\s*[/,;]\s*", via or ""):
++        part = part.strip()
++        if not part:
++            continue
++        m = re.fullmatch(r"(\d+)\s*-?\s*(?:wire|wires|core|cores)", part, re.I)
++        if m:
++            if any(m.group(1) in lt for lt in ltoks):
++                keep.append(f"{m.group(1)}-wire")
++            continue
++        if _covered(part, ltoks):
++            keep.append(part)
++    return " / ".join(keep)
++
++
++def validate_connections(raw: list[dict], lines: list[str]) -> list[dict]:
++    """Keep only connections whose endpoints really exist in the figure (see module docstring)."""
++    ltoks = line_tokens(lines)
++    out: list[dict] = []
++    seen: set[tuple] = set()
++    for e in raw or []:
++        a = str(e.get("from") or e.get("source") or "").strip()
++        b = str(e.get("to") or e.get("target") or "").strip()
++        via = str(e.get("via") or e.get("connection") or "").strip()
++        if not a or not b or norm(a) == norm(b):
++            continue
++        if not (_covered(a, ltoks) and _covered(b, ltoks)):
++            continue
++        via = _clean_via(via, ltoks)
++        key = (norm(a), norm(b), norm(via))
++        if key in seen:
++            continue
++        seen.add(key)
++        out.append({"from": a, "to": b, "via": via})
++    return out
+diff --git a/tests/parsing_arch/v6/test_p4_vlm.py b/tests/parsing_arch/v6/test_p4_vlm.py
+new file mode 100644
+index 0000000..5f3f5b8
+--- /dev/null
++++ b/tests/parsing_arch/v6/test_p4_vlm.py
+@@ -0,0 +1,285 @@
++"""v6 phase 4: local VLM connections (Ollama) + OCR fallback, with exact-match validation."""
++import dataclasses
++import json
++import threading
++import types
++from http.server import BaseHTTPRequestHandler, HTTPServer
++
++import pymupdf
++import pytest
++from docling_core.types.doc import BoundingBox, CoordOrigin, DoclingDocument, ProvenanceItem, Size
++from docling_core.types.doc.document import (
++    PictureClassificationMetaField, PictureClassificationPrediction, PictureMeta,
++)
++
++from parsers.pdf_v6 import cards, labels, ocr, vlm
++
++H = 842.0
++LABELS = [(120, 230, "SEM-IP ID1"), (120, 250, "DBUS 1"), (120, 270, "SBU ID1"), (120, 290, "SCU ID2")]
++RECT = (100, 200, 400, 420)
++
++
++def _png(shade=200, size=20) -> bytes:
++    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, size, size), False)
++    pix.set_rect(pix.irect, (shade, shade, shade))
++    return pix.tobytes("png")
++
++
++def _page(texts=(), images=()):
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=595, height=H)
++    for x, y, s in texts:
++        page.insert_text((x, y), s, fontsize=8)
++    for im in images:
++        page.insert_image(pymupdf.Rect(*im[:4]), stream=_png(im[4] if len(im) > 4 else 200))
++    return pdf, page
++
++
++def _doc(cls=("engineering_drawing", 0.9)):
++    doc = DoclingDocument(name="t")
++    doc.add_page(page_no=1, size=Size(width=595, height=H))
++    pic = doc.add_picture(prov=ProvenanceItem(page_no=1, bbox=BoundingBox(
++        l=RECT[0], t=H - RECT[1], r=RECT[2], b=H - RECT[3], coord_origin=CoordOrigin.BOTTOMLEFT), charspan=(0, 0)))
++    if cls:
++        pic.meta = PictureMeta(classification=PictureClassificationMetaField(predictions=[
++            PictureClassificationPrediction(class_name=cls[0], confidence=cls[1], created_by="t")]))
++    return doc
++
++
++def _settings(monkeypatch, **kw):
++    import config
++    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, **kw))
++
++
++def _vlm_reply(monkeypatch, payload):
++    calls = []
++
++    def fake(png, prompt, model, host, port, timeout, keep_alive="5m"):
++        calls.append({"prompt": prompt, "model": model, "png": png[:4], "keep_alive": keep_alive})
++        if isinstance(payload, Exception):
++            raise payload
++        return json.dumps(payload)
++
++    monkeypatch.setattr(vlm, "chat", fake)
++    return calls
++
++
++# ----------------------------------------------------------------------------
++# validation: exact tokens inside one label line
++# ----------------------------------------------------------------------------
++def test_validate_connections_is_exact_and_never_rewrites():
++    lines = ["SEM-IP ID1", "SBU ID1", "DBUS 1", "SCU ID2", "SRT & SCB-RU", "4"]
++    raw = [
++        {"from": "SEM-IP ID1", "to": "SBU ID1", "via": "DBUS 1 / 4-wire"},
++        {"from": "SEM-IP ID1", "to": "SBU ID3", "via": "DBUS 1"},        # ID3 not in figure
++        {"from": "SEM-IP ID1", "to": "SBU ID2", "via": ""},              # 'SBU' and 'ID2' exist, never together
++        {"from": "SEM-IP ID1", "to": "SEM-IP ID1", "via": ""},           # self loop
++        {"from": "SRT & SCB-RU", "to": "SCU ID2", "via": "DBUS 2"},     # DBUS 2 not drawn -> via dropped
++        {"from": "Server", "to": "SBU ID1", "via": ""},                  # invented label
++        {"from": "sem-ip id1", "to": "SBU ID1", "via": "DBUS 1 / 4-wire"},  # duplicate (case)
++    ]
++    kept = vlm.validate_connections(raw, lines)
++    assert [(k["from"], k["to"]) for k in kept] == [("SEM-IP ID1", "SBU ID1"), ("SRT & SCB-RU", "SCU ID2")]
++    assert kept[0]["via"] == "DBUS 1 / 4-wire" and kept[1]["via"] == ""
++
++
++def test_id_pairing_makes_split_labels_validatable():
++    _, page = _page(texts=[(120, 230, "SBU"), (150, 222, "ID1"), (120, 330, "SRT"), (400, 330, "ID2")])
++    got = labels.extract_labels(page, (100, 200, 520, 400))
++    assert vlm.validate_connections(
++        [{"from": "SBU ID1", "to": "SRT", "via": ""}, {"from": "SBU ID2", "to": "SRT", "via": ""}], got
++    ) == [{"from": "SBU ID1", "to": "SRT", "via": ""}]
++
++
++def test_parse_vlm_json_variants():
++    good = '{"connections":[{"from":"A","to":"B","via":"x"}]}'
++    assert vlm.parse_vlm_json("```json\n" + good + "\n```")[0]["from"] == "A"
++    assert vlm.parse_vlm_json("noise " + good + " tail")[0]["to"] == "B"
++    assert vlm.parse_vlm_json("not json at all") == []
++    assert vlm.parse_vlm_json('{"connections": "oops"}') == []
++    assert vlm.parse_vlm_json('{"edges":[{"source":"A","target":"B"}]}')[0]["target"] == "B"
++
++
++def test_prompt_lists_only_figure_labels_and_context():
++    p = vlm.build_prompt(["SEM-IP ID1", "DBUS 1"], "5.5 Overview", "Fig 3")
++    assert "- SEM-IP ID1" in p and "- DBUS 1" in p and "5.5 Overview" in p and "Fig 3" in p
++    assert "never invent a label" in p
++
++
++# ----------------------------------------------------------------------------
++# the Ollama request
++# ----------------------------------------------------------------------------
++def test_chat_request_shape_against_a_local_fake_server():
++    import base64
++    seen = {}
++
++    class H_(BaseHTTPRequestHandler):
++        def do_POST(self):
++            seen["path"] = self.path
++            seen["body"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
++            out = json.dumps({"message": {"content": '{"connections": []}'}}).encode()
++            self.send_response(200)
++            self.send_header("Content-Length", str(len(out)))
++            self.end_headers()
++            self.wfile.write(out)
++
++        def log_message(self, *a):
++            pass
++
++    srv = HTTPServer(("127.0.0.1", 0), H_)
++    threading.Thread(target=srv.serve_forever, daemon=True).start()
++    try:
++        reply = vlm.chat(b"\x89PNGdata", "prompt text", "qwen2.5vl:3b", "127.0.0.1", srv.server_port, 5, "2m")
++    finally:
++        srv.shutdown()
++    body = seen["body"]
++    assert reply == '{"connections": []}' and seen["path"] == "/api/chat"
++    assert body["model"] == "qwen2.5vl:3b" and body["stream"] is False and body["format"] == "json"
++    assert body["keep_alive"] == "2m"                       # unload after ingestion (compose uses KEEP_ALIVE=-1)
++    assert body["options"]["temperature"] == 0 and body["options"]["num_ctx"] == 4096
++    msg = body["messages"][0]
++    assert msg["content"] == "prompt text" and base64.b64decode(msg["images"][0]) == b"\x89PNGdata"
++
++
++# ----------------------------------------------------------------------------
++# cards with the VLM (Ollama mocked)
++# ----------------------------------------------------------------------------
++def test_vlm_keeps_only_validated_edges(monkeypatch):
++    _settings(monkeypatch, pdf_vlm_enabled=True, pdf_vlm_keep_alive="3m")
++    calls = _vlm_reply(monkeypatch, {"connections": [
++        {"from": "SEM-IP ID1", "to": "SBU ID1", "via": "DBUS 1"},
++        {"from": "SEM-IP ID1", "to": "SBU ID9", "via": "DBUS 1"},
++    ]})
++    _, page = _page(texts=LABELS, images=[(*RECT, 180)])
++    run = cards.FigureRun()
++    [card] = cards.process_pictures(_doc(), page, ["Wiring"], 2, run=run)
++    assert "Connections (machine-read, verify against the figure): SEM-IP ID1 -[DBUS 1]-> SBU ID1" in card["text"]
++    assert "SBU ID9" not in card["text"] and card["edges"] == 1
++    assert calls[0]["png"] == b"\x89PNG" and "- SEM-IP ID1" in calls[0]["prompt"] and calls[0]["keep_alive"] == "3m"
++    assert calls[0]["model"] == "qwen2.5vl:3b"
++    assert run.vlm_calls == 1 and run.stats["vlm_edges_dropped"] == 1
++
++
++def test_vlm_is_off_by_default(monkeypatch):
++    calls = _vlm_reply(monkeypatch, {"connections": []})
++    _, page = _page(texts=LABELS, images=[(*RECT, 180)])
++    [card] = cards.process_pictures(_doc(), page, [], 2)
++    assert calls == [] and "Connections" not in card["text"]
++
++
++def test_vlm_errors_and_budget_never_break_cards(monkeypatch):
++    _settings(monkeypatch, pdf_vlm_enabled=True)
++    _vlm_reply(monkeypatch, RuntimeError("ollama down"))
++    _, page = _page(texts=LABELS, images=[(*RECT, 180)])
++    run = cards.FigureRun()
++    [card] = cards.process_pictures(_doc(), page, [], 2, run=run)
++    assert "Labels:" in card["text"] and "Connections" not in card["text"] and run.stats["vlm_error"] == 1
++    _settings(monkeypatch, pdf_vlm_enabled=True, pdf_vlm_max_per_doc=0)
++    calls = _vlm_reply(monkeypatch, {"connections": []})
++    cards.process_pictures(_doc(), page, [], 2, run=cards.FigureRun())
++    assert calls == []
++
++
++def test_vlm_needs_labels_to_validate_against(monkeypatch):
++    _settings(monkeypatch, pdf_vlm_enabled=True)
++    calls = _vlm_reply(monkeypatch, {"connections": [{"from": "A", "to": "B", "via": ""}]})
++    monkeypatch.setattr(ocr, "ocr_labels", lambda png, px_per_pt=1.0: [])
++    _, page = _page(images=[(*RECT, 180)])
++    assert cards.process_pictures(_doc(), page, [], 2, run=cards.FigureRun()) == []
++    assert calls == []
++
++
++def test_vlm_skips_charts_and_photos(monkeypatch):
++    _settings(monkeypatch, pdf_vlm_enabled=True)
++    calls = _vlm_reply(monkeypatch, {"connections": []})
++    _, page = _page(texts=[(120, 230, "Jan"), (120, 250, "Feb"), (120, 270, "Mar")], images=[(*RECT, 180)])
++    [card] = cards.process_pictures(_doc(("bar_chart", 0.9)), page, [], 2, run=cards.FigureRun())
++    assert calls == [] and "Labels: Jan, Feb, Mar" in card["text"]       # chart: labels only
++
++
++def test_ocr_labels_without_vlm_when_figure_ocr_is_on(monkeypatch):
++    _settings(monkeypatch, pdf_figure_ocr=True)
++    calls = _vlm_reply(monkeypatch, {"connections": []})
++    monkeypatch.setattr(ocr, "ocr_labels", lambda png, px_per_pt=1.0: ["120", "115", "46", "SEM+"])
++    _, page = _page(images=[(*RECT, 180)])
++    [card] = cards.process_pictures(_doc(), page, ["Dimensions"], 5)
++    assert card["source"] == "ocr" and card["confidence"] == "medium"
++    assert "Labels: 120, 115, 46, SEM+" in card["text"] and "Numbers: 120, 115, 46" in card["text"]
++    assert calls == []
++
++
++def test_ocr_is_off_by_default(monkeypatch):
++    monkeypatch.setattr(ocr, "ocr_labels", lambda *a, **k: (_ for _ in ()).throw(AssertionError("OCR must not run")))
++    _, page = _page(images=[(*RECT, 180)])
++    assert cards.process_pictures(_doc(), page, [], 5) == []
++
++
++def test_ocr_fallback_feeds_the_vlm(monkeypatch):
++    _settings(monkeypatch, pdf_vlm_enabled=True)
++    calls = _vlm_reply(monkeypatch, {"connections": [{"from": "SEM-IP ID1", "to": "SBU ID1", "via": ""}]})
++    monkeypatch.setattr(ocr, "ocr_labels", lambda png, px_per_pt=1.0: ["SEM-IP ID1", "SBU ID1", "DBUS 1"])
++    _, page = _page(images=[(*RECT, 180)])
++    [card] = cards.process_pictures(_doc(), page, [], 2, run=cards.FigureRun())
++    assert card["source"] == "ocr" and card["edges"] == 1 and len(calls) == 1
++
++
++# ----------------------------------------------------------------------------
++# ocr module
++# ----------------------------------------------------------------------------
++def test_effective_dpi_caps_the_long_side_and_render_crop_makes_a_png():
++    assert ocr.effective_dpi((0, 0, 100, 100), 200) == 200
++    assert ocr.effective_dpi((0, 0, 800, 500), 200) == 144           # 1600 px * 72 / 800 pt
++    assert ocr.effective_dpi((0, 0, 5000, 100), 200) == ocr.MIN_DPI
++    _, page = _page(texts=LABELS)
++    png = ocr.render_crop(page, RECT, 100)
++    assert png[:4] == b"\x89PNG"
++    pix = pymupdf.Pixmap(png)
++    assert (pix.width, pix.height) == (pytest.approx(300 * 100 / 72, abs=2), pytest.approx(220 * 100 / 72, abs=2))
++
++
++def test_spaced_variants():
++    assert ocr.spaced_variants(["DBUS2", "ID1", "STIP3", "24VDC", "SEM-IP", "R-ABUS"]) == ["DBUS 2", "STIP 3"]
++
++
++def _fake_engine(monkeypatch, result):
++    monkeypatch.setattr(ocr, "_OCR_ENGINE", lambda png: result)
++    monkeypatch.setattr(ocr, "_OCR_FAILED", False)
++
++
++def _box(x0, y0, x1, y1):
++    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
++
++
++def test_ocr_labels_pair_ids_and_add_spaced_forms_onnxruntime_shape(monkeypatch):
++    res = ([[_box(42, 65, 218, 108), "SEM-IP", 0.99], [_box(224, 66, 300, 107), "ID1", 0.99],
++            [_box(44, 169, 178, 200), "DBUS2", 0.99], [_box(900, 900, 950, 940), "noise", 0.2]], 0.1)
++    _fake_engine(monkeypatch, res)
++    got = ocr.ocr_labels(b"png", px_per_pt=2.78)
++    assert "SEM-IP ID1" in got and "DBUS 2" in got and "DBUS2" in got and "noise" not in got
++
++
++def test_ocr_labels_rapidocr_v2_object_shape(monkeypatch):
++    res = types.SimpleNamespace(txts=("SRT", "ID2"), scores=(0.9, 0.9), boxes=[_box(0, 0, 40, 20), _box(50, 0, 90, 20)])
++    _fake_engine(monkeypatch, res)
++    assert "SRT ID2" in ocr.ocr_labels(b"png", px_per_pt=1.0)
++
++
++def test_ocr_failure_is_sticky_and_returns_empty(monkeypatch):
++    def boom(png):
++        raise RuntimeError("model missing")
++    monkeypatch.setattr(ocr, "_OCR_ENGINE", boom)
++    monkeypatch.setattr(ocr, "_OCR_FAILED", False)
++    assert ocr.ocr_labels(b"x") == [] and ocr._OCR_FAILED is True
++    assert ocr.ocr_labels(b"x") == []
++
++
++@pytest.mark.slow
++def test_real_rapidocr_reads_a_rendered_label():
++    pytest.importorskip("rapidocr_onnxruntime")
++    ocr._OCR_ENGINE, ocr._OCR_FAILED = None, False
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=300, height=120)
++    page.insert_text((20, 50), "SEM-IP ID1", fontsize=24)
++    page.insert_text((20, 95), "DBUS 2   120", fontsize=18)
++    got = ocr.ocr_labels(page.get_pixmap(dpi=150).tobytes("png"), px_per_pt=150 / 72)
++    assert "SEM-IP ID1" in got and "120" in got and any(x.replace(" ", "") == "DBUS2" for x in got)

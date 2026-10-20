@@ -28,7 +28,7 @@ gitGraph
    merge feat/parsing-architecture id: "parsing-arch merged"
    branch feat/pdf-deep-parser
    commit id: "v5: PDF deep parser (SmolVLM)"
-   commit id: "v6: DeepSeek-OCR2 migration (planned)"
+   commit id: "v6: PDF figure + VLM pipeline (phased, Qwen via Ollama)"
 ```
 
 ---
@@ -42,7 +42,7 @@ gitGraph
 | **v3** | `v3.md` | `LibreOfficeConverter` for `.doc`/`.ppt`, router updated | Internal only |
 | **v4** | `v4.md` | `PdfStubParser` for `.pdf`, router covers all formats → **ingestion endpoint switched to `parser_router`** | **Branch merge to main** |
 | **v5** | `v5.md` | `PdfPageRouter` (per-page triage, PyMuPDF4LLM, Docling, SmolVLM) | Separate branch off main post-merge |
-| **v6** | `parsing_arch_v6_vllm_migration.md` | Migrate from SmolVLM to DeepSeek-OCR2 and eventually vLLM for production batch throughput on PDF per-page OCR/VLM tier | Continuation off v5, after v5 is functional. **v6 is a planned future version only.** |
+| **v6** | `v6_plan.md` | PDF figure/diagram pipeline in phases P0-P6: Qwen VLM installed in Ollama (P0), `fitz` -> `pymupdf` (P1), deterministic Figure cards (P2), procedure chunks (P3), OCR + strictly validated VLM connections (P4), typed chunks with MinIO image links (P5), A/B harness (P6). Replaces the DeepSeek-OCR2 / vLLM plan, which is discarded (`parsing_arch_v6_vllm_migration.md` is kept only as a superseded record). | Continuation off v5.9. Each phase is opt-in via `PDF_FIGURE_PIPELINE=v6` until the A/B passes. |
 
 ---
 
@@ -64,7 +64,7 @@ v1 Foundation
             └── v3 Legacy (requires LibreOfficeConverter + DoclingParser from v2)
                     └── v4 PDF stub + pipeline (requires all formats + HybridChunker from v1)
                             └── v5 PDF deep (requires PdfPageRouter + SmolVLM integration)
-                                    └── v6 DeepSeek-OCR2 migration (requires v5's SmolVLM integration working first)
+                                    └── v6 PDF figure + VLM pipeline (requires v5.9 router, Docling figure classification and an Ollama service)
 ```
 
 ---
@@ -91,7 +91,13 @@ v1 Foundation
 | `core/parsers/pdf_router.py` | v5 | [NEW] |
 | `core/parser_router.py` | v5 | [MODIFY] swap .pdf to PdfPageRouter |
 | `config.py` | v5 | [MODIFY] Configure SmolVLM settings for PDF page routing |
-| `config.py` | v6 | [NEW] DeepSeek-OCR2 serving settings — migrate to DeepSeek-OCR2 and eventually vLLM |
+| `config.py` | v6 | [MODIFY] additive v6 settings (`PDF_FIGURE_PIPELINE`, `PDF_VLM_*`, `PDF_FIGURE_*`); DeepSeek-OCR2 / vLLM settings are no longer planned |
+| `parsers/pdf_v6/` | v6 | [NEW] figure pipeline package: `text`, `geometry`, `labels`, `gate`, `cards` (P2), `procedure` (P3), `ocr`, `vlm` (P4), `store` (P5) |
+| `parsers/pdf_router.py` | v6 | [MODIFY] additive v6 branches only (`PDF_FIGURE_PIPELINE=v6`); the v5.9 code path is untouched; `fitz` -> `pymupdf` (P1) |
+| `parsers/docling_parser.py` | v6 | [MODIFY] `_build_figure_converter` (classification, no picture description) |
+| `core/chunker.py` | v6 | [MODIFY] `figure` / `procedure` content types; moves page / bbox / image link into chunk metadata |
+| `scripts/qwen_setup.py` | v6 | [NEW] P0: background install + status + verify of the Qwen VLM in Ollama |
+| `scripts/figure_eval.py` | v6 | [NEW] P6: A/B harness for VLM models on gold figures |
 
 ---
 
@@ -107,7 +113,23 @@ tests/
     ├── v3/        (Legacy formats)
     ├── v4/        (PDF stub + pipeline)
     ├── v5/        (PDF deep parser with SmolVLM)
-    └── v6/        (DeepSeek-OCR2 migration — placeholder, empty until v5 is near-complete)
+    └── v6/        (PDF figure + VLM pipeline: test_p0_qwen_setup ... test_p6_eval, one file per phase)
 ```
 
 Each version's test directory is created alongside its plan document.
+
+---
+
+## v6 Phases (replaces the DeepSeek-OCR2 / vLLM plan)
+
+Full plan: `v6_plan.md`.  Every phase ships as its own patch with its own tests and leaves the suite green.
+
+| Phase | Delivers | Switch |
+|---|---|---|
+| P0 | `scripts/qwen_setup.py`: Qwen VLM pulled into the Ollama service in the background, status and verify commands | none (infrastructure) |
+| P1 | `fitz` -> `import pymupdf` across the app, pinned `pymupdf>=1.24.3` | none (behaviour-preserving) |
+| P2 | Deterministic Figure cards, no SmolVLM on PDF pages | `PDF_FIGURE_PIPELINE=v6` |
+| P3 | Step-by-step illustration pages -> one ordered Procedure chunk | `PDF_FIGURE_PROCEDURES` |
+| P4 | RapidOCR labels + Ollama VLM connections validated by exact match | `PDF_FIGURE_OCR`, `PDF_VLM_ENABLED` |
+| P5 | Page / bbox / MinIO image link in chunk metadata | `PDF_FIGURE_STORE` |
+| P6 | A/B harness and gold-figure template | none (tooling) |

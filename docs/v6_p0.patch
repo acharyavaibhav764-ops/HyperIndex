@@ -1,0 +1,451 @@
+diff --git a/.env.example b/.env.example
+index 27376a7..eb9c8ca 100644
+--- a/.env.example
++++ b/.env.example
+@@ -4,4 +4,7 @@ MINIO_ROOT_PASSWORD=change-me-too
+ 
+ # ChromaDB
+ CHROMA_PATH=./chroma_data
+-CHROMA_COLLECTION=my_documents
+\ No newline at end of file
++CHROMA_COLLECTION=my_documents
++
++# v6 PDF diagram VLM (pull it with: python scripts/qwen_setup.py start)
++PDF_VLM_MODEL=qwen2.5vl:3b
+diff --git a/config.py b/config.py
+index 1fe6eed..4b21c5c 100644
+--- a/config.py
++++ b/config.py
+@@ -93,6 +93,9 @@ class Settings:
+     pdf_v59_cellmarks: bool = os.getenv("PDF_V59_CELLMARKS", "true").lower() == "true"  # WP3: tick marks
+     pdf_v59_coverage: bool = os.getenv("PDF_V59_COVERAGE", "true").lower() == "true"  # WP4: coverage net
+     pdf_figure_mode: str = os.getenv("PDF_FIGURE_MODE", "labels_only")  # WP5: off / labels_only / vlm_fallback
++
++    # v6 phase 0: vision model for PDF diagrams, served by the Ollama service (see scripts/qwen_setup.py).
++    pdf_vlm_model: str = os.getenv("PDF_VLM_MODEL", "qwen2.5vl:3b")
+     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
+ 
+     # v5.9 thresholds
+diff --git a/docker-compose.gpu.yml b/docker-compose.gpu.yml
+new file mode 100644
+index 0000000..c72b37f
+--- /dev/null
++++ b/docker-compose.gpu.yml
+@@ -0,0 +1,14 @@
++# Optional override: give the Ollama service the NVIDIA GPU (e.g. the GTX 1650 dev machine).
++# Without it the container runs on CPU, which works but is slow for vision models.
++#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d ollama
++# Needs Docker Desktop with WSL2 GPU support (or the NVIDIA Container Toolkit on Linux).
++# NOT tested on your machine: check `docker exec honeywell_ollama nvidia-smi` afterwards.
++services:
++  ollama:
++    deploy:
++      resources:
++        reservations:
++          devices:
++            - driver: nvidia
++              count: all
++              capabilities: [gpu]
+diff --git a/scripts/qwen_setup.py b/scripts/qwen_setup.py
+new file mode 100644
+index 0000000..c197346
+--- /dev/null
++++ b/scripts/qwen_setup.py
+@@ -0,0 +1,223 @@
++#!/usr/bin/env python3
++"""v6 step zero: install the Qwen vision model into Ollama and keep going in the background.
++
++The pull of a ~3 GB model takes a while, so ``start`` spawns a detached worker and returns
++immediately; ``status`` shows progress; ``verify`` proves the model can read a labelled image.
++
++  python scripts/qwen_setup.py start    # begin the background pull (resumable, safe to re-run)
++  python scripts/qwen_setup.py status   # installed? how far is the pull?
++  python scripts/qwen_setup.py verify   # tiny image -> model -> checks the label comes back
++  python scripts/qwen_setup.py pull     # same pull, but in the foreground (shows progress)
++
++Ollama runs in Docker (service ``ollama``, port 11434 published), so the default URL is
++http://localhost:11434.  Override with ``--ollama`` or the OLLAMA_URL env var; pick another
++model with ``--model`` or PDF_VLM_MODEL.  Standard library only (``verify`` also needs PyMuPDF).
++"""
++from __future__ import annotations
++
++import argparse
++import base64
++import json
++import os
++import subprocess
++import sys
++import time
++import urllib.error
++import urllib.request
++
++DEFAULT_MODEL = os.getenv("PDF_VLM_MODEL", "qwen2.5vl:3b")
++DEFAULT_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
++DEFAULT_LOG = os.getenv("QWEN_PULL_LOG", "qwen_pull.log")
++FRESH_SECONDS = 45  # a log touched within this window means a worker is still pulling
++
++
++# ----------------------------------------------------------------------------
++# Ollama helpers
++# ----------------------------------------------------------------------------
++def _norm_model(name: str) -> str:
++    return name if ":" in name else f"{name}:latest"
++
++
++def _get_json(url: str, timeout: float = 5.0) -> dict:
++    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - local service
++        return json.loads(resp.read().decode("utf-8"))
++
++
++def list_models(base: str) -> set[str]:
++    """Names of the models Ollama has installed (empty set when it is unreachable)."""
++    try:
++        data = _get_json(base.rstrip("/") + "/api/tags")
++    except (urllib.error.URLError, OSError, ValueError):
++        return set()
++    return {_norm_model(m.get("name", "")) for m in data.get("models", []) if m.get("name")}
++
++
++def model_installed(base: str, model: str) -> bool:
++    return _norm_model(model) in list_models(base)
++
++
++def ollama_reachable(base: str) -> bool:
++    try:
++        _get_json(base.rstrip("/") + "/api/tags")
++        return True
++    except (urllib.error.URLError, OSError, ValueError):
++        return False
++
++
++# ----------------------------------------------------------------------------
++# background pull
++# ----------------------------------------------------------------------------
++def _log(path: str, **fields) -> None:
++    fields["t"] = round(time.time(), 1)
++    with open(path, "a", encoding="utf-8") as fh:
++        fh.write(json.dumps(fields) + "\n")
++
++
++def pull_worker(base: str, model: str, log_path: str, timeout: float = 3600.0) -> int:
++    """Stream ``/api/pull`` into ``log_path`` (one JSON object per line).  0 = success."""
++    body = json.dumps({"model": model, "name": model, "stream": True}).encode("utf-8")
++    req = urllib.request.Request(
++        base.rstrip("/") + "/api/pull", data=body, headers={"Content-Type": "application/json"}
++    )
++    _log(log_path, status="starting", model=model)
++    try:
++        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local service
++            for raw in resp:
++                line = raw.decode("utf-8", "replace").strip()
++                if not line:
++                    continue
++                try:
++                    msg = json.loads(line)
++                except ValueError:
++                    continue
++                if msg.get("error"):
++                    _log(log_path, error=str(msg["error"]))
++                    return 1
++                _log(log_path, **{k: msg[k] for k in ("status", "digest", "total", "completed") if k in msg})
++                if msg.get("status") == "success":
++                    return 0
++    except (urllib.error.URLError, OSError) as exc:
++        _log(log_path, error=f"{type(exc).__name__}: {exc}")
++        return 1
++    _log(log_path, error="stream ended before 'success'")
++    return 1
++
++
++def read_progress(log_path: str) -> dict:
++    """Summarise the log: state = none|running|stalled|done|error, percent of the current layer."""
++    if not os.path.exists(log_path):
++        return {"state": "none"}
++    last, layer = {}, {}
++    with open(log_path, encoding="utf-8") as fh:
++        for line in fh:
++            try:
++                msg = json.loads(line)
++            except ValueError:
++                continue
++            last = msg
++            if msg.get("total"):
++                layer = msg
++    if last.get("error"):
++        return {"state": "error", "detail": last["error"]}
++    if last.get("status") == "success":
++        return {"state": "done"}
++    pct = None
++    if layer.get("total"):
++        pct = round(100.0 * layer.get("completed", 0) / layer["total"], 1)
++    age = time.time() - os.path.getmtime(log_path)
++    return {"state": "running" if age <= FRESH_SECONDS else "stalled",
++            "status": last.get("status", ""), "percent": pct, "idle_seconds": round(age)}
++
++
++def start_background(base: str, model: str, log_path: str) -> str:
++    """Spawn a detached pull worker.  Returns 'installed' | 'running' | 'started'."""
++    if model_installed(base, model):
++        return "installed"
++    if read_progress(log_path).get("state") == "running":
++        return "running"
++    cmd = [sys.executable, os.path.abspath(__file__), "worker",
++           "--ollama", base, "--model", model, "--log", log_path]
++    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
++    if os.name == "nt":  # survive the terminal being closed
++        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
++    else:
++        kwargs["start_new_session"] = True
++    subprocess.Popen(cmd, **kwargs)  # noqa: S603
++    return "started"
++
++
++# ----------------------------------------------------------------------------
++# verify
++# ----------------------------------------------------------------------------
++def label_image_png(text: str = "SEM-IP ID1") -> bytes:
++    """A small PNG with ``text`` rendered on it (needs PyMuPDF)."""
++    try:
++        import pymupdf
++    except ImportError:  # PyMuPDF < 1.24.3
++        import fitz as pymupdf  # type: ignore
++    pdf = pymupdf.open()
++    page = pdf.new_page(width=260, height=90)
++    page.insert_text((20, 55), text, fontsize=26)
++    return page.get_pixmap(dpi=110).tobytes("png")
++
++
++def verify(base: str, model: str, expect: str = "ID1", timeout: float = 600.0) -> tuple[bool, str, float]:
++    """Ask the model to read a label from an image.  (ok, reply, seconds)."""
++    body = {
++        "model": model, "stream": False, "keep_alive": "5m",
++        "options": {"temperature": 0, "num_predict": 40, "num_ctx": 2048},
++        "messages": [{"role": "user",
++                      "content": "Read the text in this image. Reply with the text only.",
++                      "images": [base64.b64encode(label_image_png()).decode("ascii")]}],
++    }
++    req = urllib.request.Request(
++        base.rstrip("/") + "/api/chat", data=json.dumps(body).encode("utf-8"),
++        headers={"Content-Type": "application/json"},
++    )
++    t0 = time.time()
++    try:
++        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local service
++            reply = str(json.loads(resp.read().decode("utf-8")).get("message", {}).get("content", ""))
++    except (urllib.error.URLError, OSError, ValueError) as exc:
++        return False, f"{type(exc).__name__}: {exc}", time.time() - t0
++    return expect.lower() in reply.lower(), reply.strip(), time.time() - t0
++
++
++# ----------------------------------------------------------------------------
++# CLI
++# ----------------------------------------------------------------------------
++def main(argv: list[str] | None = None) -> int:
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("cmd", choices=["start", "status", "verify", "pull", "worker"])
++    ap.add_argument("--model", default=DEFAULT_MODEL)
++    ap.add_argument("--ollama", default=DEFAULT_URL)
++    ap.add_argument("--log", default=DEFAULT_LOG)
++    a = ap.parse_args(argv)
++
++    if a.cmd in ("start", "pull", "verify") and not ollama_reachable(a.ollama):
++        print(f"Ollama is not reachable at {a.ollama}. Start it first: docker compose up -d ollama")
++        return 2
++    if a.cmd == "start":
++        res = start_background(a.ollama, a.model, a.log)
++        print({"installed": f"{a.model} is already installed.",
++               "running": f"A pull of {a.model} is already running; see: status",
++               "started": f"Pulling {a.model} in the background (log: {a.log}). Check with: status"}[res])
++        return 0
++    if a.cmd in ("pull", "worker"):
++        rc = pull_worker(a.ollama, a.model, a.log)
++        if a.cmd == "pull":
++            print("pull finished" if rc == 0 else f"pull failed; see {a.log}")
++        return rc
++    if a.cmd == "status":
++        prog = read_progress(a.log)
++        print(f"ollama reachable : {ollama_reachable(a.ollama)}")
++        print(f"{a.model} installed: {model_installed(a.ollama, a.model)}")
++        print(f"pull             : {prog}")
++        return 0
++    ok, reply, secs = verify(a.ollama, a.model)
++    print(f"{'OK' if ok else 'FAILED'}: {a.model} answered in {secs:.1f}s -> {reply!r}")
++    return 0 if ok else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/parsing_arch/v6/__init__.py b/tests/parsing_arch/v6/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/parsing_arch/v6/test_p0_qwen_setup.py b/tests/parsing_arch/v6/test_p0_qwen_setup.py
+new file mode 100644
+index 0000000..2141507
+--- /dev/null
++++ b/tests/parsing_arch/v6/test_p0_qwen_setup.py
+@@ -0,0 +1,165 @@
++"""v6 phase 0: Qwen install helper (scripts/qwen_setup.py) against a fake Ollama server."""
++import importlib.util
++import json
++import pathlib
++import threading
++import time
++from http.server import BaseHTTPRequestHandler, HTTPServer
++
++import pytest
++
++SCRIPT = pathlib.Path(__file__).resolve().parents[3] / "scripts" / "qwen_setup.py"
++
++
++@pytest.fixture(scope="module")
++def qs():
++    spec = importlib.util.spec_from_file_location("qwen_setup", SCRIPT)
++    mod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(mod)
++    return mod
++
++
++class FakeOllama:
++    """Tiny Ollama stand-in: /api/tags, streaming /api/pull, /api/chat."""
++
++    def __init__(self, models=(), pull_lines=None, chat_reply="SEM-IP ID1"):
++        self.models, self.chat_reply, self.chat_bodies, self.pull_bodies = list(models), chat_reply, [], []
++        self.pull_lines = pull_lines if pull_lines is not None else [
++            {"status": "pulling manifest"},
++            {"status": "pulling abc", "digest": "sha256:abc", "total": 1000, "completed": 250},
++            {"status": "pulling abc", "digest": "sha256:abc", "total": 1000, "completed": 1000},
++            {"status": "success"},
++        ]
++        outer = self
++
++        class H(BaseHTTPRequestHandler):
++            def log_message(self, *a):
++                pass
++
++            def _send(self, payload: bytes):
++                self.send_response(200)
++                self.send_header("Content-Length", str(len(payload)))
++                self.end_headers()
++                self.wfile.write(payload)
++
++            def do_GET(self):
++                self._send(json.dumps({"models": [{"name": m} for m in outer.models]}).encode())
++
++            def do_POST(self):
++                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
++                if self.path == "/api/pull":
++                    outer.pull_bodies.append(body)
++                    self._send(("\n".join(json.dumps(l) for l in outer.pull_lines) + "\n").encode())
++                else:
++                    outer.chat_bodies.append(body)
++                    self._send(json.dumps({"message": {"content": outer.chat_reply}}).encode())
++
++        self.srv = HTTPServer(("127.0.0.1", 0), H)
++        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
++        self.url = f"http://127.0.0.1:{self.srv.server_port}"
++
++    def close(self):
++        self.srv.shutdown()
++
++
++@pytest.fixture
++def fake():
++    made = []
++
++    def make(**kw):
++        f = FakeOllama(**kw)
++        made.append(f)
++        return f
++
++    yield make
++    for f in made:
++        f.close()
++
++
++def test_model_installed_matches_latest_tag(qs, fake):
++    f = fake(models=["qwen2.5vl:3b", "llama3.2:latest"])
++    assert qs.model_installed(f.url, "qwen2.5vl:3b")
++    assert qs.model_installed(f.url, "llama3.2")          # bare name == :latest
++    assert not qs.model_installed(f.url, "qwen3-vl:4b")
++
++
++def test_unreachable_ollama_is_reported_not_raised(qs):
++    assert qs.list_models("http://127.0.0.1:9") == set()
++    assert qs.ollama_reachable("http://127.0.0.1:9") is False
++
++
++def test_pull_worker_logs_progress_and_finishes(qs, fake, tmp_path):
++    f = fake()
++    log = str(tmp_path / "pull.log")
++    assert qs.pull_worker(f.url, "qwen2.5vl:3b", log) == 0
++    assert f.pull_bodies[0]["model"] == "qwen2.5vl:3b" and f.pull_bodies[0]["stream"] is True
++    prog = qs.read_progress(log)
++    assert prog == {"state": "done"}
++    lines = [json.loads(l) for l in open(log, encoding="utf-8")]
++    assert lines[0]["status"] == "starting" and any(l.get("completed") == 250 for l in lines)
++
++
++def test_read_progress_running_percent_and_stalled(qs, tmp_path):
++    log = tmp_path / "p.log"
++    log.write_text(json.dumps({"status": "pulling abc", "total": 2000, "completed": 500}) + "\n")
++    p = qs.read_progress(str(log))
++    assert p["state"] == "running" and p["percent"] == 25.0
++    old = time.time() - 600
++    import os
++    os.utime(log, (old, old))
++    assert qs.read_progress(str(log))["state"] == "stalled"
++    assert qs.read_progress(str(tmp_path / "missing.log")) == {"state": "none"}
++
++
++def test_pull_worker_reports_ollama_errors(qs, fake, tmp_path):
++    f = fake(pull_lines=[{"status": "pulling manifest"}, {"error": "pull model manifest: file does not exist"}])
++    log = str(tmp_path / "pull.log")
++    assert qs.pull_worker(f.url, "nope:1b", log) == 1
++    assert qs.read_progress(log) == {"state": "error", "detail": "pull model manifest: file does not exist"}
++
++
++def test_pull_worker_connection_failure_is_logged(qs, tmp_path):
++    log = str(tmp_path / "pull.log")
++    assert qs.pull_worker("http://127.0.0.1:9", "m", log, timeout=2) == 1
++    assert qs.read_progress(log)["state"] == "error"
++
++
++def test_start_background_spawns_detached_worker_once(qs, fake, tmp_path, monkeypatch):
++    f = fake()
++    spawned = []
++    monkeypatch.setattr(qs.subprocess, "Popen", lambda cmd, **kw: spawned.append((cmd, kw)))
++    log = str(tmp_path / "pull.log")
++    assert qs.start_background(f.url, "qwen2.5vl:3b", log) == "started"
++    cmd, kw = spawned[0]
++    assert cmd[1].endswith("qwen_setup.py") and cmd[2] == "worker" and "--model" in cmd and "qwen2.5vl:3b" in cmd
++    assert kw.get("start_new_session") or kw.get("creationflags")       # detached on posix / windows
++    # a fresh, unfinished log means a worker is alive -> no second spawn
++    pathlib.Path(log).write_text(json.dumps({"status": "pulling abc", "total": 10, "completed": 1}) + "\n")
++    assert qs.start_background(f.url, "qwen2.5vl:3b", log) == "running"
++    assert len(spawned) == 1
++
++
++def test_start_background_skips_when_already_installed(qs, fake, tmp_path, monkeypatch):
++    f = fake(models=["qwen2.5vl:3b"])
++    monkeypatch.setattr(qs.subprocess, "Popen", lambda *a, **k: pytest.fail("must not spawn"))
++    assert qs.start_background(f.url, "qwen2.5vl:3b", str(tmp_path / "l.log")) == "installed"
++
++
++def test_verify_checks_the_label_comes_back(qs, fake):
++    f = fake(chat_reply="The text reads SEM-IP ID1.")
++    ok, reply, secs = qs.verify(f.url, "qwen2.5vl:3b")
++    assert ok and "ID1" in reply and secs >= 0
++    body = f.chat_bodies[0]
++    assert body["model"] == "qwen2.5vl:3b" and body["keep_alive"] == "5m" and body["options"]["temperature"] == 0
++    assert body["messages"][0]["images"][0]                         # a real PNG was sent
++    bad = fake(chat_reply="HOME THEATRE SYSTEM")
++    assert qs.verify(bad.url, "qwen2.5vl:3b")[0] is False
++
++
++def test_cli_status_and_unreachable(qs, fake, tmp_path, capsys):
++    f = fake(models=["qwen2.5vl:3b"])
++    assert qs.main(["status", "--ollama", f.url, "--log", str(tmp_path / "x.log")]) == 0
++    out = capsys.readouterr().out
++    assert "installed: True" in out and "reachable : True" in out
++    assert qs.main(["start", "--ollama", "http://127.0.0.1:9"]) == 2
++    assert "docker compose up -d ollama" in capsys.readouterr().out

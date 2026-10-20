@@ -93,6 +93,9 @@ class Settings:
     pdf_v59_cellmarks: bool = os.getenv("PDF_V59_CELLMARKS", "true").lower() == "true"  # WP3: tick marks
     pdf_v59_coverage: bool = os.getenv("PDF_V59_COVERAGE", "true").lower() == "true"  # WP4: coverage net
     pdf_figure_mode: str = os.getenv("PDF_FIGURE_MODE", "labels_only")  # WP5: off / labels_only / vlm_fallback
+
+    # v6 phase 0: vision model for PDF diagrams, served by the Ollama service (see scripts/qwen_setup.py).
+    pdf_vlm_model: str = os.getenv("PDF_VLM_MODEL", "qwen2.5vl:3b")
     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
 
     # v5.9 thresholds

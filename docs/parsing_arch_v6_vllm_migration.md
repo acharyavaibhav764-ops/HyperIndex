@@ -1,3 +1,6 @@
+> **SUPERSEDED.** This stub is discarded.  v6 is now the phased PDF figure + VLM pipeline (Qwen via
+> Ollama, no DeepSeek-OCR2 and no vLLM).  See `v6_plan.md`.  The text below is kept as a record only.
+
 # v6 Scope Stub: vLLM Migration for DeepSeek-OCR2
 
 **Status**: Planned future version — **DO NOT EXECUTE as part of any current session.**  
