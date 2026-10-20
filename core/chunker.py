@@ -261,6 +261,7 @@ class Chunker:
 
         chunker = HybridChunker(
             tokenizer=settings.chunker_tokenizer,
+            max_tokens=getattr(settings, "chunker_max_tokens", 1024),  # v6: figure cards can exceed 512
             serializer_provider=_MarkdownTableSerializerProvider(),  # v5.7
             repeat_table_header=True,
         )

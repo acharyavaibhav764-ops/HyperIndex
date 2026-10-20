@@ -318,3 +318,50 @@ def test_chunker_tags_figure_cards():
     from core.chunker import _FIGURE_CARD_RE
     assert _FIGURE_CARD_RE.search("pre\nFigure: (untitled) | Type: engineering drawing | Labels: a")
     assert not _FIGURE_CARD_RE.search("Figure 3 shows the unit")
+
+
+# ----------------------------------------------------------------------------
+# ISSUE-05 fix: vector fallback via cluster_drawings()
+# ----------------------------------------------------------------------------
+def test_vector_fallback_produces_cards_when_doc_has_no_pictures(monkeypatch):
+    """When Docling finds no PictureItem, cluster_drawings() bboxes drive cards."""
+    import dataclasses, types
+    import config
+
+    # Page with 4 labelled text items — simulates a wiring diagram's text layer
+    _labels = [(120, 230, "SEM-IP ID1"), (120, 250, "DBUS 1"), (120, 270, "SBU ID1"), (120, 290, "SCU ID2")]
+    pdf, page = _page(texts=_labels)
+
+    # DoclingDocument with NO pictures
+    doc = DoclingDocument(name="t")
+    doc.add_page(page_no=1, size=Size(width=595, height=H))
+    assert not doc.pictures  # precondition
+
+    # Patch cluster_drawings to return one big rect covering the label region
+    monkeypatch.setattr(page, "cluster_drawings", lambda: [pymupdf.Rect(80, 200, 420, 650)],
+                        raising=False)
+
+    _settings(monkeypatch,
+              pdf_figure_pipeline="v6",
+              pdf_figure_mode="labels_only",
+              pdf_figure_tech_regex="SEM|SBU|SCU|DBUS",
+              pdf_figure_repeat_min_pages=3,
+              pdf_figure_procedures=False)
+
+    result = cards.process_pictures(doc, page, ["3 Electrical connection"], 4)
+    assert len(result) >= 1, "Expected >=1 card from vector fallback"
+    assert any("SEM-IP" in c["text"] or "DBUS" in c["text"] for c in result)
+
+
+def test_normal_docling_path_unaffected_by_vector_fallback():
+    """When doc.pictures is non-empty, the normal Docling path runs (not cluster_drawings)."""
+    pdf, page = _page(texts=LABELS,
+                      images=[(100, 200, 400, 420)])
+    doc, _ = _doc([RECT], classes={0: ("wiring_diagram", 0.9)})
+    assert doc.pictures  # precondition — Docling path
+
+    run = cards.FigureRun()
+    result = cards.process_pictures(doc, page, ["3 Electrical connection"], 4, run=run)
+    # vector_fallback stat should NOT be recorded
+    assert "vector_fallback" not in run.stats
+

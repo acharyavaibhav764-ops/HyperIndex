@@ -19,7 +19,7 @@ class Settings:
     chroma_collection: str = os.getenv("CHROMA_COLLECTION", "my_documents")
 
     # Ollama
-    ollama_host: str = os.getenv("OLLAMA_HOST", "ollama")
+    ollama_host: str = os.getenv("OLLAMA_HOST", "localhost")
     ollama_port: str = os.getenv("OLLAMA_PORT", "11434")
     ollama_model: str = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
@@ -113,7 +113,7 @@ class Settings:
     pdf_figure_ocr: bool = os.getenv("PDF_FIGURE_OCR", "false").lower() == "true"
     pdf_figure_render_dpi: int = int(os.getenv("PDF_FIGURE_RENDER_DPI", "200"))
     pdf_vlm_enabled: bool = os.getenv("PDF_VLM_ENABLED", "false").lower() == "true"
-    pdf_vlm_timeout: int = int(os.getenv("PDF_VLM_TIMEOUT", "120"))
+    pdf_vlm_timeout: int = int(os.getenv("PDF_VLM_TIMEOUT", "300"))  # Qwen2.5vl:3b needs ~125s on CPU
     pdf_vlm_max_per_doc: int = int(os.getenv("PDF_VLM_MAX_PER_DOC", "40"))
     # Per-request unload time: compose runs Ollama with OLLAMA_KEEP_ALIVE=-1 (models never unload).
     pdf_vlm_keep_alive: str = os.getenv("PDF_VLM_KEEP_ALIVE", "5m")

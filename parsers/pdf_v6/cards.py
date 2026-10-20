@@ -59,6 +59,34 @@ class FigureRun:
         return cls(repeated={d for d, ps in pages_by_digest.items() if len(ps) >= min_pages})
 
 
+def _vector_candidates(page, page_no: int, run: "FigureRun") -> list[dict]:
+    """Fallback: use PyMuPDF cluster_drawings() to find vector figure bboxes.
+
+    Called when Docling produces no PictureItem on the page (common for wiring
+    diagrams that Docling's layout model classifies as RefItem / text).
+    Each cluster is treated like a synthetic PictureItem with cls='wiring_diagram'.
+    """
+    cands: list[dict] = []
+    try:
+        clusters = page.cluster_drawings()
+    except Exception:
+        return cands
+    for idx, rect in enumerate(clusters):
+        bbox = tuple(rect)
+        reason = gate.geometry_skip(bbox)
+        if reason:
+            run.note(reason)
+            continue
+        cands.append({
+            "idx": idx,
+            "pic": None,  # no Docling PictureItem — synthetic
+            "figure_id": f"fig_p{page_no}_v{idx}",
+            "bbox": bbox,
+            "cls": "wiring_diagram",  # default for vector clusters
+        })
+    return cands
+
+
 def _picture_digest(page, bbox) -> str:
     try:
         for info in page.get_image_info(hashes=True):
@@ -118,9 +146,10 @@ def process_pictures(
     """Build Figure / Procedure cards for the pictures Docling found on one page.
 
     ``page`` is a single-page ``pymupdf.Page`` (live text for labels, pixels for crops).
+    Falls back to PyMuPDF ``cluster_drawings()`` when Docling finds no PictureItem
+    (common for vector wiring/schematic diagrams classified as RefItem by rt_detr_v2).
     """
-    if not getattr(doc, "pictures", None):
-        return []
+    has_docling_pics = bool(getattr(doc, "pictures", None))
     st = _settings()
     run = run or FigureRun()
     section = " > ".join(heading_path) if isinstance(heading_path, (list, tuple)) else str(heading_path or "")
@@ -133,32 +162,51 @@ def process_pictures(
             table_boxes.append(tb)
 
     cands: list[dict] = []
-    for idx, pic in enumerate(doc.pictures):
-        c = {"idx": idx, "pic": pic, "figure_id": f"fig_p{page_no}_{idx}"}
-        bbox = geometry.item_bbox(pic, doc, page)
-        if bbox is None:
-            run.note("skip_no_bbox")
-            continue
-        reason = gate.geometry_skip(bbox)
-        if reason:
-            run.note(reason)
-            continue
-        if any(geometry.inside(bbox, tb) for tb in table_boxes):
-            run.note("skip_in_table")
-            continue
-        dig = _picture_digest(page, bbox)
-        if dig and dig in run.repeated:
-            run.note("skip_repeated")
-            continue
-        cls = gate.effective_class(*geometry.class_info(pic))
-        labels = lbl.extract_labels(page, bbox)
-        tech = lbl.is_technical(labels, tech_re)
-        reason = gate.class_skip(cls, tech, len(labels))
-        if reason:
-            run.note(reason)
-            continue
-        c.update(bbox=bbox, cls=cls, labels=labels, tech=tech)
-        cands.append(c)
+
+    if has_docling_pics:
+        # --- Normal path: Docling PictureItems ---
+        for idx, pic in enumerate(doc.pictures):
+            c = {"idx": idx, "pic": pic, "figure_id": f"fig_p{page_no}_{idx}"}
+            bbox = geometry.item_bbox(pic, doc, page)
+            if bbox is None:
+                run.note("skip_no_bbox")
+                continue
+            reason = gate.geometry_skip(bbox)
+            if reason:
+                run.note(reason)
+                continue
+            if any(geometry.inside(bbox, tb) for tb in table_boxes):
+                run.note("skip_in_table")
+                continue
+            dig = _picture_digest(page, bbox)
+            if dig and dig in run.repeated:
+                run.note("skip_repeated")
+                continue
+            cls = gate.effective_class(*geometry.class_info(pic))
+            extracted = lbl.extract_labels(page, bbox)
+            tech = lbl.is_technical(extracted, tech_re)
+            reason = gate.class_skip(cls, tech, len(extracted))
+            if reason:
+                run.note(reason)
+                continue
+            c.update(bbox=bbox, cls=cls, labels=extracted, tech=tech)
+            cands.append(c)
+    else:
+        # --- Fallback path: vector cluster_drawings() ---
+        run.note("vector_fallback")
+        for c in _vector_candidates(page, page_no, run):
+            bbox = c["bbox"]
+            if any(geometry.inside(bbox, tb) for tb in table_boxes):
+                run.note("skip_in_table")
+                continue
+            extracted = lbl.extract_labels(page, bbox)
+            tech = lbl.is_technical(extracted, tech_re)
+            reason = gate.class_skip(c["cls"], tech, len(extracted))
+            if reason:
+                run.note(reason)
+                continue
+            c.update(labels=extracted, tech=tech)
+            cands.append(c)
 
     cards: list[dict] = []
     consumed: set[int] = set()
