@@ -5,6 +5,7 @@ from .libreoffice_converter import (
     LibreOfficeConverter,
     LibreOfficeNotFoundError,
 )
+from .pdf import PdfParser
 from .router import ParserRouter, UnsupportedFileError
 from .text import TextParser
 
@@ -14,8 +15,8 @@ __all__ = [
     "LibreOfficeConversionError",
     "LibreOfficeConverter",
     "LibreOfficeNotFoundError",
+    "PdfParser",
     "TextParser",
     "ParserRouter",
     "UnsupportedFileError",
 ]
-

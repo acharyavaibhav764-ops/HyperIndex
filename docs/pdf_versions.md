@@ -9,10 +9,14 @@ Each version represents an independent, fully testable, and commit-ready milesto
 ## 🛠️ Execution Protocol: Zero Branch-Switching Workflow
 
 > [!IMPORTANT]
-> **No branch switching is needed during execution.**
-> 1. The developer/user stays on their clean target branch (e.g. `dev` or a dedicated feature branch branched from `dev`).
-> 2. The assistant (Antigravity/Gemini) extracts, references, and adapts the original implementation heuristics directly from `parser_v1` using Git object inspection (e.g., `git show parser_v1:<path>`) without ever switching the active workspace branch.
+> **Active Implementation Branch**: `pdf_refactor` (branched from `dev`).
+> **Reference Branch**: `parser_v1` (remote/local reference containing original heuristics).
+> 
+> **No branch switching is needed during execution**:
+> 1. The developer and assistant remain strictly on the active branch **`pdf_refactor`**.
+> 2. The assistant (Antigravity/Gemini) extracts, references, and adapts the original implementation heuristics directly from `parser_v1` using Git object inspection (`git show parser_v1:<path>`) without ever switching the active workspace branch.
 > 3. All modules are built and verified incrementally in `core/parsers/pdf/` against `dev`'s unified pipeline configuration and test suites.
+> 4. Once all versions (PDF v1.0 through v5.0) are completed, `pdf_refactor` can be merged cleanly into `dev` with **zero merge conflicts**.
 
 ---
 

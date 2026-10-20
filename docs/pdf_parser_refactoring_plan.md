@@ -3,10 +3,15 @@
 ## 🛠️ Execution Protocol: Zero Branch-Switching Workflow
 
 > [!IMPORTANT]
+> **Active Implementation Branch**: `pdf_refactor` (branched from `dev`).
+> **Reference Branch**: `parser_v1` (containing original heuristics and empirical bug fixes).
+>
 > **Zero Branch-Switching Guarantee**:
-> The entire restructuring and implementation will take place on the clean, conflict-free target branch (e.g. `dev` or a feature branch branched off `dev`).
-> The assistant will reference, extract, and adapt all functional heuristics (cellmarks, triage, heading fixes, Wingdings, token cleanup) directly from `parser_v1` using Git object inspection (`git show parser_v1:parsers/...`).
-> Neither the user nor the agent needs to repeatedly `git checkout` or `git switch` back and forth.
+> 1. The developer and assistant remain strictly on the active branch **`pdf_refactor`**.
+> 2. The assistant will reference, extract, and adapt all functional heuristics (cellmarks, triage, heading fixes, Wingdings, token cleanup) directly from `parser_v1` using Git object inspection (`git show parser_v1:parsers/...`).
+> 3. Neither the user nor the agent needs to repeatedly `git checkout` or `git switch` back and forth.
+> 4. All modules are built and verified incrementally in `core/parsers/pdf/` against `dev`'s unified pipeline configuration and test suites.
+> 5. When all 5 versions are completed, `pdf_refactor` merges cleanly into `dev` with **zero merge conflicts**.
 
 ---
 

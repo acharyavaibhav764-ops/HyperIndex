@@ -4,6 +4,7 @@ from docling_core.types.doc import DoclingDocument
 from .base import BaseParser
 from .docling_parser import DoclingParser
 from .libreoffice_converter import LibreOfficeConverter
+from .pdf import PdfParser
 from .text import TextParser
 
 
@@ -34,6 +35,7 @@ class ParserRouter:
         self.register(TextParser()) # .txt / .md
         self.register(DoclingParser()) # .docx / .pptx
         self.register(LibreOfficeConverter()) # .doc / .ppt
+        self.register(PdfParser()) # .pdf
 
 
     # PUBLIC API
