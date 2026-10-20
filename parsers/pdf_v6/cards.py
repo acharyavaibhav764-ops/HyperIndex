@@ -33,6 +33,8 @@ class FigureRun:
     repeated: set = field(default_factory=set)
     stats: dict = field(default_factory=dict)
     vlm_calls: int = 0
+    doc_key: str = ""          # stable per-file key (sha1 prefix) for figure object names
+    store: object = None       # FigureStore (MinIO) or None
 
     def note(self, key: str) -> None:
         self.stats[key] = self.stats.get(key, 0) + 1
@@ -86,6 +88,16 @@ def format_card(caption: str, kind: str, section: str, labels: list[str],
         )
         parts.append("Connections (machine-read, verify against the figure): " + body)
     return " | ".join(parts)
+
+
+def format_tail(page_no: int, bbox, url: str) -> str:
+    """Trailing ' | Page: n | BBox: x0,y0,x1,y1 | Image: s3://...' (the chunker moves it to metadata)."""
+    parts = [f"Page: {page_no + 1}"]
+    if bbox:
+        parts.append("BBox: " + ",".join(f"{v:.0f}" for v in bbox))
+    if url:
+        parts.append(f"Image: {url}")
+    return " | " + " | ".join(parts)
 
 
 def format_procedure(steps: list[str], section: str) -> str:
@@ -159,8 +171,10 @@ def process_pictures(
         steps = procedure.build_procedure(page, [c["bbox"] for c in panels]) if len(panels) >= 3 else None
         if steps:
             consumed = {c["idx"] for c in panels}
+            proc_text = format_procedure(steps, section)
+            proc_text += format_tail(page_no, None, "")
             cards.append({
-                "figure_id": f"proc_p{page_no}", "text": format_procedure(steps, section),
+                "figure_id": f"proc_p{page_no}", "text": proc_text,
                 "content_type": "procedure", "class_hint": "procedure",
                 "confidence": "high", "source": "text_layer", "page": page_no,
             })
@@ -223,11 +237,23 @@ def process_pictures(
 
         conf = "high" if source == "text_layer" and len(labels) >= lbl.MIN_LABELS_FOR_CARD else (
             "medium" if source == "ocr" else "low")
+        card_text = format_card(caption, cls, section, labels, connections)
+        url = ""
+        if run.store is not None and run.doc_key:
+            try:
+                png = png or ocr.render_crop(page, bbox, int(getattr(st, "pdf_figure_render_dpi", 200)))
+                url = run.store.put(run.doc_key, c["figure_id"], png)
+                run.note("figure_stored")
+            except Exception as exc:
+                run.note("figure_store_failed")
+                logger.warning("pdf_v6: %s crop upload failed: %s", c["figure_id"], exc)
+        card_text += format_tail(page_no, bbox, url)
         cards.append({
             "figure_id": c["figure_id"],
-            "text": format_card(caption, cls, section, labels, connections),
+            "text": card_text,
             "content_type": "figure", "class_hint": cls, "confidence": conf,
             "source": source, "edges": len(connections), "page": page_no,
+            "bbox": bbox, "image": url,
         })
         run.note("card")
 

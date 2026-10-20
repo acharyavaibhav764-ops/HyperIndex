@@ -117,6 +117,10 @@ class Settings:
     pdf_vlm_max_per_doc: int = int(os.getenv("PDF_VLM_MAX_PER_DOC", "40"))
     # Per-request unload time: compose runs Ollama with OLLAMA_KEEP_ALIVE=-1 (models never unload).
     pdf_vlm_keep_alive: str = os.getenv("PDF_VLM_KEEP_ALIVE", "5m")
+
+    # v6 phase 5: upload each figure crop to MinIO (needs the minio service) and link it in chunk metadata.
+    pdf_figure_store: bool = os.getenv("PDF_FIGURE_STORE", "false").lower() == "true"
+    pdf_figure_store_prefix: str = os.getenv("PDF_FIGURE_STORE_PREFIX", "figures")
     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
 
     # v5.9 thresholds

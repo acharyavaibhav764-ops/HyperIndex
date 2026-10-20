@@ -27,6 +27,28 @@ from core.chunk_cleanup import (  # v5.8 / v5.9.1
 # v6: Figure cards written by parsers/pdf_v6/cards.py.
 _FIGURE_CARD_RE = re.compile(r"(?m)^Figure: .*? \| (?:Type|Section|Labels):")
 _PROCEDURE_RE = re.compile(r"(?m)^Procedure \(\d+ illustrated steps\)")  # v6 phase 3
+# v6 phase 5: trailing " | Page: n | BBox: ... | Image: s3://..." that cards.format_tail appends.
+_FIG_TAIL_RE = re.compile(r" \| Page: (\d+)(?: \| BBox: ([\d.,-]+))?(?: \| Image: (\S+))?\s*$")
+
+
+def _split_figure_tail(text: str) -> tuple[str, dict[str, Any]]:
+    """Move a card's Page/BBox/Image tail out of the embedded text into metadata."""
+    meta: dict[str, Any] = {}
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if not (line.startswith("Figure: ") or line.startswith("Procedure (")):
+            continue
+        m = _FIG_TAIL_RE.search(line)
+        if not m:
+            continue
+        lines[i] = line[:m.start()]
+        meta["figure_page"] = int(m.group(1))
+        if m.group(2):
+            meta["figure_bbox"] = m.group(2)
+        if m.group(3):
+            meta["figure_image"] = m.group(3)
+        break
+    return "\n".join(lines), meta
 
 
 def _flatten_meta(meta: dict[str, Any]) -> dict[str, Any]:
@@ -316,6 +338,9 @@ class Chunker:
                 except Exception:
                     pass
 
+            fig_meta: dict[str, Any] = {}
+            if content_type in ("figure", "procedure"):
+                text, fig_meta = _split_figure_tail(text)
             meta: dict[str, Any] = {
                 "document_id": file_id,
                 "file_id": file_id,
@@ -329,6 +354,7 @@ class Chunker:
                 "section_id": section_id(page, heading_list),
                 **doc_meta,
             }
+            meta.update(fig_meta)
             if is_picture_chunk:
                 meta["source"] = "image_description"
 

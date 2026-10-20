@@ -569,6 +569,11 @@ class PdfPageRouter(BaseParser):
         if settings.pdf_figure_pipeline == "v6":
             try:
                 self._fig_run = v6_cards.FigureRun.from_pdf(pdf, settings.pdf_figure_repeat_min_pages)
+                if settings.pdf_figure_store:  # crops -> MinIO, keyed by file content
+                    import hashlib
+                    from .pdf_v6.store import FigureStore
+                    self._fig_run.doc_key = hashlib.sha1(file_bytes).hexdigest()[:16]
+                    self._fig_run.store = FigureStore.from_settings(settings)
             except Exception as exc:
                 logger.warning("pdf_v6: run setup failed: %s", exc)
 

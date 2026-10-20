@@ -156,7 +156,7 @@ def test_diagram_card_uses_text_layer_labels():
     assert card["content_type"] == "figure" and card["confidence"] == "high" and card["source"] == "text_layer"
     assert card["figure_id"] == "fig_p4_0"
     assert card["text"].startswith("Figure: (untitled) | Type: engineering drawing | Section: 5.6 Room wiring | Labels: ")
-    assert "SEM-IP ID1" in card["text"] and "SCU ID2" in card["text"] and card["text"].endswith("| Numbers: 1")
+    assert "SEM-IP ID1" in card["text"] and "SCU ID2" in card["text"] and "| Numbers: 1" in card["text"]
 
 
 def test_product_photo_without_text_gets_no_card_and_is_counted():
