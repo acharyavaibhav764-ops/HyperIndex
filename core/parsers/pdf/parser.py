@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 class PdfParser(BaseParser):
     """
     Parse PDF documents into a DoclingDocument using a per-page triage architecture.
+
+    Text-heavy pages are processed via PyMuPDF4LLM for fast markdown generation.
+    Table pages are routed through Docling for high-fidelity table structures.
+    Image/diagram pages are routed through SmolVLM for visual descriptions.
     """
 
     SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".pdf"})
@@ -54,10 +58,12 @@ class PdfParser(BaseParser):
             return fallback_conv.convert(stream).document
 
         page_markdowns: list[str] = []
+        raw_texts: list[str] = []
 
         # Compile raw page markdowns after triage
         try:
             for page_idx, page in enumerate(pdf):
+                raw_texts.append(page.get_text())
                 routes = self.triager.triage_page(page)
 
                 # Dual Table + Image route
@@ -90,14 +96,14 @@ class PdfParser(BaseParser):
                     md = self.pymupdf_backend.extract_page_markdown(pdf, page_idx)
                     page_markdowns.append(md)
 
+            # Normalize markdowns with coverage recovery
+            processed_markdowns = self.post_processor.process_markdowns(page_markdowns, raw_texts=raw_texts)
+
+            # Merge per-page markdowns into unified DoclingDocument
+            combined_doc = merge_pages_to_docling(processed_markdowns, filename)
+
+            # Normalize AST structure and visual cellmarks
+            return self.post_processor.process_document(combined_doc, pdf=pdf)
+
         finally:
             pdf.close()
-
-        # Normalize markdowns 
-        processed_markdowns = self.post_processor.process_markdowns(page_markdowns)
-
-        # Merge per-page markdowns into unified DoclingDocument
-        combined_doc = merge_pages_to_docling(processed_markdowns, filename)
-
-        # Normalize AST structure
-        return self.post_processor.process_document(combined_doc)
