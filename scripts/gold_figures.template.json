@@ -1,0 +1,29 @@
+[
+  {
+    "id": "sem_ip_id1_room",
+    "page": 0,
+    "bbox": [0, 0, 0, 0],
+    "section": "FILL: section heading",
+    "labels": ["IP-PoE", "SEM-IP ID1", "DBUS 1", "DBUS 2", "SRT & SCB-RU", "SBU ID1", "WC", "SCU ID2", "PU (Max. 5 x)"],
+    "edges": [["IP-PoE", "SEM-IP ID1"], ["SCU ID2", "PU"]],
+    "_note": "EXAMPLE from your image 3. Set page (1-based) and bbox from `list`; add only connections you are sure about."
+  },
+  {
+    "id": "r5_three_bed_room",
+    "page": 0,
+    "bbox": [0, 0, 0, 0],
+    "section": "FILL",
+    "labels": ["Ward", "Room", "Bed 1", "Bed 2", "Bed 3", "Bathroom / Toilett", "ID1", "ID2", "ID3", "[2]", "[3]", "[4]", "[7]", "[14]", "[15]"],
+    "edges": [],
+    "_note": "EXAMPLE from your image 1. Fill edges you can verify by eye; leave [] to score labels only."
+  },
+  {
+    "id": "system_overview_5_5",
+    "page": 0,
+    "bbox": [0, 0, 0, 0],
+    "section": "5.5 System overview ward controller & cluster controller",
+    "labels": ["Server", "Switch", "SMCc", "SEM-IP ID2/3", "SCIP+", "SEM", "STIP", "SEM+", "SRT & SCB-RM"],
+    "edges": [["Server", "Switch"], ["Switch", "SMCc"], ["Switch", "SCIP+"]],
+    "_note": "EXAMPLE from your image 2."
+  }
+]
