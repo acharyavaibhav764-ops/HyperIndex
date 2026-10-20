@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from . import gate, geometry
 from . import labels as lbl
 from . import text as txt
+from . import procedure
 
 if TYPE_CHECKING:  # pragma: no cover
     from docling_core.types.doc import DoclingDocument
@@ -85,6 +86,14 @@ def format_card(caption: str, kind: str, section: str, labels: list[str],
     return " | ".join(parts)
 
 
+def format_procedure(steps: list[str], section: str) -> str:
+    parts = [f"Procedure ({len(steps)} illustrated steps)"]
+    if section:
+        parts.append(f"Section: {section}")
+    parts.extend(f"Step {i}: {s}" for i, s in enumerate(steps, 1))
+    return " | ".join(parts)
+
+
 def process_pictures(
     doc: "DoclingDocument",
     page,
@@ -140,6 +149,20 @@ def process_pictures(
     cards: list[dict] = []
     consumed: set[int] = set()
 
+    # ---- procedure: 3+ similar, label-poor, non-technical panels with captions beneath
+    if getattr(st, "pdf_figure_procedures", True):
+        panels = [c for c in cands
+                  if not c["tech"] and len(c["labels"]) < lbl.MIN_LABELS_FOR_CARD
+                  and c["cls"] not in gate.CHART_CLASSES]
+        steps = procedure.build_procedure(page, [c["bbox"] for c in panels]) if len(panels) >= 3 else None
+        if steps:
+            consumed = {c["idx"] for c in panels}
+            cards.append({
+                "figure_id": f"proc_p{page_no}", "text": format_procedure(steps, section),
+                "content_type": "procedure", "class_hint": "procedure",
+                "confidence": "high", "source": "text_layer", "page": page_no,
+            })
+            run.note("procedure")
 
     # ---- figure cards
     for c in cands:

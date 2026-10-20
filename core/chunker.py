@@ -26,6 +26,7 @@ from core.chunk_cleanup import (  # v5.8 / v5.9.1
 
 # v6: Figure cards written by parsers/pdf_v6/cards.py.
 _FIGURE_CARD_RE = re.compile(r"(?m)^Figure: .*? \| (?:Type|Section|Labels):")
+_PROCEDURE_RE = re.compile(r"(?m)^Procedure \(\d+ illustrated steps\)")  # v6 phase 3
 
 
 def _flatten_meta(meta: dict[str, Any]) -> dict[str, Any]:
@@ -297,6 +298,8 @@ class Chunker:
                 content_type = "toc"
             elif "[Recovered text]" in text:
                 content_type = "recovered_text"
+            elif _PROCEDURE_RE.search(text):
+                content_type = "procedure"
             elif text.startswith("Figure:") or _FIGURE_CARD_RE.search(text) or is_picture_chunk:
                 content_type = "figure"
             else:

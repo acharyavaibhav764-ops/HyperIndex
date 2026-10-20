@@ -104,6 +104,9 @@ class Settings:
     # Technical tokens that rescue a diagram the classifier called photo/logo/icon.
     # Empty = built-in Honeywell nurse-call tokens (see parsers/pdf_v6/labels.py).
     pdf_figure_tech_regex: str = os.getenv("PDF_FIGURE_TECH_REGEX", "")
+
+    # v6 phase 3: step-by-step illustration pages -> one ordered Procedure chunk.
+    pdf_figure_procedures: bool = os.getenv("PDF_FIGURE_PROCEDURES", "true").lower() == "true"
     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
 
     # v5.9 thresholds
