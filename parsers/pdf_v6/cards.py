@@ -14,6 +14,7 @@ from . import gate, geometry
 from . import labels as lbl
 from . import text as txt
 from . import procedure
+from . import ocr, vlm
 
 if TYPE_CHECKING:  # pragma: no cover
     from docling_core.types.doc import DoclingDocument
@@ -31,6 +32,7 @@ class FigureRun:
     """Per-document state shared across pages."""
     repeated: set = field(default_factory=set)
     stats: dict = field(default_factory=dict)
+    vlm_calls: int = 0
 
     def note(self, key: str) -> None:
         self.stats[key] = self.stats.get(key, 0) + 1
@@ -170,6 +172,23 @@ def process_pictures(
             continue
         pic, bbox, cls, labels = c["pic"], c["bbox"], c["cls"], list(c["labels"])
         source = "text_layer" if labels else "none"
+        png = None
+        wants_vlm = bool(getattr(st, "pdf_vlm_enabled", False))
+        use_ocr = wants_vlm or bool(getattr(st, "pdf_figure_ocr", False))
+        if use_ocr and len(labels) < lbl.MIN_LABELS_FOR_CARD and (cls in gate.DIAGRAM_CLASSES or c["tech"]):
+            try:
+                dpi = int(getattr(st, "pdf_figure_render_dpi", 200))
+                png = ocr.render_crop(page, bbox, dpi)
+                found = ocr.ocr_labels(png, px_per_pt=ocr.effective_dpi(bbox, dpi) / 72.0)
+                if len(found) > len(labels):
+                    labels, source = found, "ocr"
+                    c["tech"] = lbl.is_technical(labels, tech_re)
+            except Exception as exc:
+                logger.warning("pdf_v6: %s OCR failed: %s", c["figure_id"], exc)
+            reason = gate.class_skip(cls, c["tech"], len(labels))
+            if reason:
+                run.note(reason)
+                continue
 
         caption = ""
         try:
@@ -181,6 +200,26 @@ def process_pictures(
             continue
 
         connections: list[dict] = []
+        max_vlm = int(getattr(st, "pdf_vlm_max_per_doc", 40))
+        if (wants_vlm and len(labels) >= lbl.MIN_LABELS_FOR_CARD
+                and (cls in gate.DIAGRAM_CLASSES or c["tech"]) and run.vlm_calls < max_vlm):
+            try:
+                png = png or ocr.render_crop(page, bbox, int(getattr(st, "pdf_figure_render_dpi", 200)))
+                run.vlm_calls += 1
+                raw = vlm.parse_vlm_json(vlm.chat(
+                    png, vlm.build_prompt(labels, section, caption),
+                    getattr(st, "pdf_vlm_model", "qwen2.5vl:3b"),
+                    st.ollama_host, st.ollama_port,
+                    int(getattr(st, "pdf_vlm_timeout", 120)),
+                    str(getattr(st, "pdf_vlm_keep_alive", "5m")),
+                ))
+                connections = vlm.validate_connections(raw, labels + ([caption] if caption else []))
+                run.note("vlm_edges_kept" if connections else "vlm_edges_none")
+                if raw and len(connections) < len(raw):
+                    run.note("vlm_edges_dropped")
+            except Exception as exc:
+                run.note("vlm_error")
+                logger.warning("pdf_v6: %s VLM read failed: %s", c["figure_id"], exc)
 
         conf = "high" if source == "text_layer" and len(labels) >= lbl.MIN_LABELS_FOR_CARD else (
             "medium" if source == "ocr" else "low")

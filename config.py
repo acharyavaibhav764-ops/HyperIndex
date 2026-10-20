@@ -107,6 +107,16 @@ class Settings:
 
     # v6 phase 3: step-by-step illustration pages -> one ordered Procedure chunk.
     pdf_figure_procedures: bool = os.getenv("PDF_FIGURE_PROCEDURES", "true").lower() == "true"
+
+    # v6 phase 4: RapidOCR labels for diagrams without a text layer, and the Ollama VLM that reads
+    # connections. The VLM is OFF until the A/B on your gold figures says it is precise enough.
+    pdf_figure_ocr: bool = os.getenv("PDF_FIGURE_OCR", "false").lower() == "true"
+    pdf_figure_render_dpi: int = int(os.getenv("PDF_FIGURE_RENDER_DPI", "200"))
+    pdf_vlm_enabled: bool = os.getenv("PDF_VLM_ENABLED", "false").lower() == "true"
+    pdf_vlm_timeout: int = int(os.getenv("PDF_VLM_TIMEOUT", "120"))
+    pdf_vlm_max_per_doc: int = int(os.getenv("PDF_VLM_MAX_PER_DOC", "40"))
+    # Per-request unload time: compose runs Ollama with OLLAMA_KEEP_ALIVE=-1 (models never unload).
+    pdf_vlm_keep_alive: str = os.getenv("PDF_VLM_KEEP_ALIVE", "5m")
     pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"  # WP7
 
     # v5.9 thresholds
