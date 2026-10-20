@@ -15,6 +15,7 @@ from .backends import (
     merge_pages_to_docling,
     single_page_bytes,
 )
+from .postprocess import PdfPostProcessor
 from .triage import PageRoute, PageTriager
 
 logger = logging.getLogger(__name__)
@@ -23,10 +24,6 @@ logger = logging.getLogger(__name__)
 class PdfParser(BaseParser):
     """
     Parse PDF documents into a DoclingDocument using a per-page triage architecture.
-
-    Text-heavy pages are processed via PyMuPDF4LLM for fast markdown generation.
-    Table pages are routed through Docling for high-fidelity table structures.
-    Image/diagram pages are routed through SmolVLM for visual descriptions.
     """
 
     SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".pdf"})
@@ -38,6 +35,7 @@ class PdfParser(BaseParser):
         self.pymupdf_backend = PyMuPdfBackend()
         self.docling_backend = DoclingTableBackend()
         self.vlm_backend = VlmPictureBackend()
+        self.post_processor = PdfPostProcessor()
 
     def can_handle(self, ext: str) -> bool:
         """Return True if this parser supports the given file extension."""
@@ -95,5 +93,11 @@ class PdfParser(BaseParser):
         finally:
             pdf.close()
 
-        # Merge to docling document
-        return merge_pages_to_docling(page_markdowns, filename)
+        # Normalize markdowns 
+        processed_markdowns = self.post_processor.process_markdowns(page_markdowns)
+
+        # Merge per-page markdowns into unified DoclingDocument
+        combined_doc = merge_pages_to_docling(processed_markdowns, filename)
+
+        # Normalize AST structure
+        return self.post_processor.process_document(combined_doc)
