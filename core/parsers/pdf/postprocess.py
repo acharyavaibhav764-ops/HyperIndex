@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 from collections import Counter
 from docling_core.types.doc import DoclingDocument
 
 from .transforms.cellmarks import inject_marks
 from .transforms.cleanup import clean_page_markdown, strip_running_lines
-from .transforms.coverage import check_page_coverage
+from .transforms.coverage import check_page, check_page_coverage
 from .transforms.figures import inject_figure_cards
 from .transforms.glyphs import normalize_glyphs
 from .transforms.structure import (
@@ -17,6 +18,8 @@ from .transforms.structure import (
 
 if TYPE_CHECKING:
     import fitz
+
+logger = logging.getLogger(__name__)
 
 
 class PdfPostProcessor:
@@ -45,10 +48,15 @@ class PdfPostProcessor:
 
         # Coverage safety net: recover dropped raw text
         if raw_texts and len(raw_texts) == len(processed):
-            processed = [
-                check_page_coverage(md, raw)
-                for md, raw in zip(processed, raw_texts)
-            ]
+            running_lines: set[str] = set()
+            repaired: list[str] = []
+            for md, raw in zip(processed, raw_texts):
+                try:
+                    repaired.append(check_page(md, raw, running_lines))
+                except Exception as exc:
+                    logger.warning("Coverage check failed: %s", exc)
+                    repaired.append(md)
+            processed = repaired
 
         return processed
 
@@ -62,8 +70,11 @@ class PdfPostProcessor:
         
         # Visual transforms: detect table availability checkmarks via bounding box collision
         if pdf is not None:
-            for page_idx, page in enumerate(pdf):
-                inject_marks(doc, page, page_idx + 1)
+            for page in pdf:
+                try:
+                    inject_marks(doc, page)
+                except Exception as exc:
+                    logger.debug("Document-level inject_marks skipped: %s", exc)
 
         # Clean and deduplicate figure cards
         inject_figure_cards(doc)

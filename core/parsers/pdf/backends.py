@@ -16,6 +16,9 @@ from docling_core.types.io import DocumentStream
 
 from core import pipeline_config
 from ..docling_parser import _build_vlm_converter, _inject_picture_descriptions # Uses VLM methods from docling_parser
+from .transforms.cellmarks import inject_marks
+from .transforms.cleanup import strip_inline_emphasis
+from .transforms.figures import process_pictures
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,7 @@ def merge_pages_to_docling(
     md_converter = DocumentConverter(allowed_formats=[InputFormat.MD])
 
     for page_no, md in enumerate(page_markdowns, start=1):  # 1-indexed page provenance
+        md = strip_inline_emphasis(md)
         stream = DocumentStream(
             name=f"page_{page_no}.md",
             stream=BytesIO(md.encode("utf-8")),
@@ -84,12 +88,49 @@ class DoclingTableBackend:
             self._converter = DocumentConverter(allowed_formats=[InputFormat.PDF])
         return self._converter
 
-    def extract_page_markdown(self, page_pdf_bytes: bytes, filename: str, use_ocr: bool = True) -> str:
-        """Convert single-page PDF bytes with Docling and export to markdown."""
+    def extract_page_markdown(
+        self,
+        page_pdf_bytes: bytes,
+        filename: str,
+        use_ocr: bool = True,
+        legend: dict[str, str] | None = None,
+        page_no: int = 1,
+    ) -> str:
+        """Convert single-page PDF bytes with Docling, inject cellmarks/figures, and export to markdown."""
         
         stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
         doc = self._get_converter().convert(stream).document
-        return doc.export_to_markdown()
+
+        page_fitz = None
+        pdf_single = None
+        try:
+            pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
+            page_fitz = pdf_single[0]
+        except Exception as exc:
+            logger.warning("cellmarks: failed to open single page pdf: %s", exc)
+
+        cards = []
+        if page_fitz is not None:
+            try:
+                inject_marks(doc, page_fitz, legend=legend, repeat_min=3)
+            except Exception as exc:
+                logger.warning("cellmarks: page %d failed: %s", page_no, exc)
+
+            try:
+                cards = process_pictures(
+                    doc, page_fitz, heading_path=[], page_no=page_no, mode="labels_only"
+                )
+            except Exception as exc:
+                logger.warning("pdf_figures: page %d failed: %s", page_no, exc)
+
+            pdf_single.close()
+
+        md = doc.export_to_markdown()
+        if cards:
+            card_md = "\n\n".join(c["text"] for c in cards if c.get("text"))
+            if card_md:
+                md = f"{md}\n\n{card_md}"
+        return md
 
 
 class VlmPictureBackend:
@@ -109,7 +150,14 @@ class VlmPictureBackend:
                 return None
         return self._vlm_converter
 
-    def extract_page_markdown(self, page_pdf_bytes: bytes, filename: str, use_ocr: bool = True) -> str:
+    def extract_page_markdown(
+        self,
+        page_pdf_bytes: bytes,
+        filename: str,
+        use_ocr: bool = True,
+        legend: dict[str, str] | None = None,
+        page_no: int = 1,
+    ) -> str:
         """Run SmolVLM description pipeline on single-page PDF bytes."""
         
         vlm = self._get_vlm_converter()
@@ -119,12 +167,24 @@ class VlmPictureBackend:
             stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
             converter = DocumentConverter(allowed_formats=[InputFormat.PDF])
             doc = converter.convert(stream).document
+            try:
+                pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
+                inject_marks(doc, pdf_single[0], legend=legend, repeat_min=3)
+                pdf_single.close()
+            except Exception as exc:
+                logger.warning("cellmarks (fallback path): page %d failed: %s", page_no, exc)
             return doc.export_to_markdown()
 
         try:
             stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
             doc = vlm.convert(stream).document
             _inject_picture_descriptions(doc)
+            try:
+                pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
+                inject_marks(doc, pdf_single[0], legend=legend, repeat_min=3)
+                pdf_single.close()
+            except Exception as exc:
+                logger.warning("cellmarks (vlm path): page %d failed: %s", page_no, exc)
             return doc.export_to_markdown()
         except Exception as exc:
             logger.warning("VLM page extraction failed: %s; falling back to PyMuPDF", exc)
@@ -155,4 +215,3 @@ class VlmPictureBackend:
         except Exception as exc:
             logger.warning("Picture description only extraction failed: %s", exc)
             return ""
-

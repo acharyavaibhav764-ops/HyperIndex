@@ -16,6 +16,7 @@ from .backends import (
     single_page_bytes,
 )
 from .postprocess import PdfPostProcessor
+from .transforms.cellmarks import scan_legend
 from .transforms.cleanup import build_vocab
 from .triage import PageRoute, PageTriager
 
@@ -61,13 +62,14 @@ class PdfParser(BaseParser):
         page_markdowns: list[str] = []
 
         try:
-            # Step 1: Upfront document extraction and analysis
+            # Upfront document extraction and analysis
             page_texts = [p.get_text() for p in pdf]
             raw_texts = page_texts
             vocab = build_vocab(page_texts)
             ocr_pages = {i for i, t in enumerate(page_texts) if len(t.strip()) < 40}
+            tick_legend = scan_legend(page_texts)
 
-            # Step 2: Per-page triage and backend dispatch
+            # Per-page triage and backend dispatch
             for page_idx, page in enumerate(pdf):
                 routes = self.triager.triage_page(page)
                 use_ocr = page_idx in ocr_pages
@@ -75,7 +77,9 @@ class PdfParser(BaseParser):
                 # Dual Table + Image route
                 if PageRoute.TABLE in routes and PageRoute.IMAGE in routes:
                     p_bytes = single_page_bytes(pdf, page_idx)
-                    table_md = self.docling_backend.extract_page_markdown(p_bytes, filename, use_ocr=use_ocr)
+                    table_md = self.docling_backend.extract_page_markdown(
+                        p_bytes, filename, use_ocr=use_ocr, legend=tick_legend, page_no=page_idx + 1
+                    )
                     fig_captions = self.vlm_backend.extract_picture_descriptions_only(p_bytes, filename, use_ocr=use_ocr)
                     combined_md = f"{table_md}\n\n{fig_captions}".strip() if fig_captions else table_md
                     page_markdowns.append(combined_md)
@@ -83,13 +87,17 @@ class PdfParser(BaseParser):
                 # Table-only route
                 elif PageRoute.TABLE in routes:
                     p_bytes = single_page_bytes(pdf, page_idx)
-                    md = self.docling_backend.extract_page_markdown(p_bytes, filename, use_ocr=use_ocr)
+                    md = self.docling_backend.extract_page_markdown(
+                        p_bytes, filename, use_ocr=use_ocr, legend=tick_legend, page_no=page_idx + 1
+                    )
                     page_markdowns.append(md)
 
                 # Image-only route
                 elif PageRoute.IMAGE in routes:
                     p_bytes = single_page_bytes(pdf, page_idx)
-                    md = self.vlm_backend.extract_page_markdown(p_bytes, filename, use_ocr=use_ocr)
+                    md = self.vlm_backend.extract_page_markdown(
+                        p_bytes, filename, use_ocr=use_ocr, legend=tick_legend, page_no=page_idx + 1
+                    )
                     page_markdowns.append(md)
 
                 # Default: Text-heavy route via PyMuPDF4LLM
@@ -97,15 +105,15 @@ class PdfParser(BaseParser):
                     md = self.pymupdf_backend.extract_page_markdown(pdf, page_idx, use_ocr=use_ocr)
                     page_markdowns.append(md)
 
-            # Step 3: Markdown transformations (glyphs, running lines, vocabulary cleanup, coverage)
+            # Markdown transformations (glyphs, running lines, vocabulary cleanup, coverage)
             processed_markdowns = self.post_processor.process_markdowns(
                 page_markdowns, raw_texts=raw_texts, vocab=vocab
             )
 
-            # Step 4: Merge per-page markdowns into unified DoclingDocument
+            # Merge per-page markdowns into unified DoclingDocument
             combined_doc = merge_pages_to_docling(processed_markdowns, filename)
 
-            # Step 5: Document-level transformations (headings, captions, echoes, blacklist, visual cellmarks)
+            # Document-level transformations (headings, captions, echoes, blacklist, visual cellmarks)
             return self.post_processor.process_document(combined_doc, pdf=pdf, vocab=vocab)
 
         finally:

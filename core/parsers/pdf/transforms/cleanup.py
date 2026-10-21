@@ -689,3 +689,36 @@ def clean_markdown_page(md: str, vocab: Counter | None = None) -> str:
         return md
     md = strip_vlm_tokens(md)
     return clean_page_markdown(md, vocab=vocab)
+
+
+_ITALIC_RE = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
+
+
+def strip_inline_emphasis(md: str) -> str:
+    """v5.9.1: remove **bold** / *italic* markers before the markdown -> DoclingDocument round trip.
+
+    Docling's markdown backend splits or drops inline strong runs (lost: 'No' in '- No presence 2',
+    'SF12', 'be set.'; fragmented: 'without presence 2' / ', for' / '1 bed' on separate lines).
+    Emphasis carries no retrieval value, so it is removed up front. Headings (#) are untouched.
+    """
+    if not md:
+        return md
+    md = md.replace("**", "")
+    return _ITALIC_RE.sub(r"\1", md)
+
+
+_ITALIC_RE = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
+
+
+def strip_inline_emphasis(md: str) -> str:
+    """v5.9.1: remove **bold** / *italic* markers before the markdown -> DoclingDocument round trip.
+
+    Docling's markdown backend splits or drops inline strong runs (lost: 'No' in '- No presence 2',
+    'SF12', 'be set.'; fragmented: 'without presence 2' / ', for' / '1 bed' on separate lines).
+    Emphasis carries no retrieval value, so it is removed up front. Headings (#) are untouched.
+    """
+    if not md:
+        return md
+    md = md.replace("**", "")
+    return _ITALIC_RE.sub(r"\1", md)
+

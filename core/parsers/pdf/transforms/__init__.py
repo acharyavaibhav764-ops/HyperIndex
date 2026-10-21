@@ -13,10 +13,11 @@ from .cleanup import (
     repair_heading_sequence,
     segment_words,
     strip_running_lines,
+    strip_inline_emphasis,
     strip_vlm_tokens,
 )
-from .coverage import check_page_coverage
-from .figures import inject_figure_cards
+from .coverage import check_page, check_page_coverage
+from .figures import inject_figure_cards, process_pictures
 from .glyphs import normalize_glyphs, strip_glyphs
 from .structure import (
     blacklist_headings,
@@ -36,6 +37,7 @@ __all__ = [
     "blacklist_headings",
     "bind_captions",
     "build_vocab",
+    "check_page",
     "check_page_coverage",
     "clean_markdown_page",
     "clean_markdown_tables",
@@ -50,6 +52,7 @@ __all__ = [
     "inject_marks",
     "is_noise_paragraph",
     "normalize_glyphs",
+    "process_pictures",
     "rejoin_urls",
     "relevel_headings",
     "renumber_sequence",
@@ -61,6 +64,7 @@ __all__ = [
     "scan_legend",
     "segment_words",
     "strip_glyphs",
+    "strip_inline_emphasis",
     "strip_running_lines",
     "strip_vlm_tokens",
     "tag_toc_structures",
