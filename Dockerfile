@@ -14,6 +14,8 @@ RUN apt-get update \
 	   libreoffice-writer \
 	   libreoffice-impress \
 	   default-jre-headless \
+	   libgl1 \
+	   libglib2.0-0 \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /code/requirements.txt

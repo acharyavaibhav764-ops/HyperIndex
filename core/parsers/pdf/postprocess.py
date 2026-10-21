@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from collections import Counter
 from docling_core.types.doc import DoclingDocument
 
 from .transforms.cellmarks import inject_marks
-from .transforms.cleanup import clean_markdown_page, strip_running_lines
+from .transforms.cleanup import clean_page_markdown, strip_running_lines
 from .transforms.coverage import check_page_coverage
 from .transforms.figures import inject_figure_cards
 from .transforms.glyphs import normalize_glyphs
-from .transforms.structure import repair_headings, tag_toc_structures
+from .transforms.structure import (
+    repair_pdf_headings,
+    repair_pdf_structure,
+    tag_toc_structures,
+)
 
 if TYPE_CHECKING:
     import fitz
@@ -17,14 +22,15 @@ if TYPE_CHECKING:
 class PdfPostProcessor:
     """
     Coordinates markdown-level and document-level transformations:
-    - Markdown stage: glyph normalization, running footer/header stripping, token cleanup.
-    - Document stage: heading freeze fixes, heading depth normalization, ToC tagging.
+    - Markdown stage: glyph normalization, running footer/header stripping, token cleanup, table splitting.
+    - Document stage: cross-page boilerplate demotion, heading freeze fixes, caption binding, releveling, ToC tagging.
     """
 
     def process_markdowns(
         self,
         markdowns: list[str],
         raw_texts: list[str] | None = None,
+        vocab: Counter | None = None,
     ) -> list[str]:
         """Apply glyph normalization, coverage recovery, and markdown sanitation to extracted page markdowns."""
         
@@ -34,8 +40,8 @@ class PdfPostProcessor:
         # Strip repeating headers/footers across consecutive pages
         processed = strip_running_lines(processed)
 
-        # Clean token debris and excessive whitespace
-        processed = [clean_markdown_page(md) for md in processed]
+        # Clean table structures, token debris, lost spaces, and excessive whitespace
+        processed = [clean_page_markdown(md, vocab=vocab) for md in processed]
 
         # Coverage safety net: recover dropped raw text
         if raw_texts and len(raw_texts) == len(processed):
@@ -50,6 +56,7 @@ class PdfPostProcessor:
         self,
         doc: DoclingDocument,
         pdf: fitz.Document | None = None,
+        vocab: Counter | None = None,
     ) -> DoclingDocument:
         """Apply AST repairs, cellmarks detection, and heading hierarchy corrections to the merged DoclingDocument."""
         
@@ -61,8 +68,11 @@ class PdfPostProcessor:
         # Clean and deduplicate figure cards
         inject_figure_cards(doc)
 
-        # Fix heading freeze and normalize section levels
-        repair_headings(doc)
+        # Cross-page boilerplate demotion and heading level normalization
+        repair_pdf_headings(doc, min_page_repeats=3)
+
+        # Document-level AST repairs (captions, releveling, echoes, blacklist, vocab cleaning)
+        repair_pdf_structure(doc, vocab=vocab)
 
         # Tag Table of Contents entries
         tag_toc_structures(doc)

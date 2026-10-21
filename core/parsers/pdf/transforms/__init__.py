@@ -1,18 +1,65 @@
 from .cellmarks import inject_marks, scan_legend
-from .cleanup import clean_markdown_page, strip_running_lines, strip_vlm_tokens
+from .cleanup import (
+    build_vocab,
+    clean_markdown_page,
+    clean_markdown_tables,
+    clean_page_markdown,
+    collapse_letter_spacing,
+    fix_heading_number,
+    fix_lost_spaces,
+    is_noise_paragraph,
+    rejoin_urls,
+    renumber_sequence,
+    repair_heading_sequence,
+    segment_words,
+    strip_running_lines,
+    strip_vlm_tokens,
+)
 from .coverage import check_page_coverage
 from .figures import inject_figure_cards
 from .glyphs import normalize_glyphs, strip_glyphs
-from .structure import repair_headings, tag_toc_structures
+from .structure import (
+    blacklist_headings,
+    bind_captions,
+    clean_text_items,
+    dedupe_echoes,
+    extract_doc_metadata,
+    relevel_headings,
+    repair_heading_numbers,
+    repair_headings,
+    repair_pdf_headings,
+    repair_pdf_structure,
+    tag_toc_structures,
+)
 
 __all__ = [
-    "clean_markdown_page",
+    "blacklist_headings",
+    "bind_captions",
+    "build_vocab",
     "check_page_coverage",
+    "clean_markdown_page",
+    "clean_markdown_tables",
+    "clean_page_markdown",
+    "clean_text_items",
+    "collapse_letter_spacing",
+    "dedupe_echoes",
+    "extract_doc_metadata",
+    "fix_heading_number",
+    "fix_lost_spaces",
     "inject_figure_cards",
     "inject_marks",
+    "is_noise_paragraph",
     "normalize_glyphs",
+    "rejoin_urls",
+    "relevel_headings",
+    "renumber_sequence",
+    "repair_heading_numbers",
+    "repair_heading_sequence",
     "repair_headings",
+    "repair_pdf_headings",
+    "repair_pdf_structure",
     "scan_legend",
+    "segment_words",
     "strip_glyphs",
     "strip_running_lines",
     "strip_vlm_tokens",

@@ -66,7 +66,7 @@ class PyMuPdfBackend:
     """Fast markdown extraction backend for text-heavy PDF pages."""
 
     @staticmethod
-    def extract_page_markdown(pdf: fitz.Document, page_no: int) -> str:
+    def extract_page_markdown(pdf: fitz.Document, page_no: int, use_ocr: bool = True) -> str:
         """Extract markdown for page_no (0-indexed) using PyMuPDF4LLM."""
         
         md = pymupdf4llm.to_markdown(pdf, pages=[page_no])
@@ -84,7 +84,7 @@ class DoclingTableBackend:
             self._converter = DocumentConverter(allowed_formats=[InputFormat.PDF])
         return self._converter
 
-    def extract_page_markdown(self, page_pdf_bytes: bytes, filename: str) -> str:
+    def extract_page_markdown(self, page_pdf_bytes: bytes, filename: str, use_ocr: bool = True) -> str:
         """Convert single-page PDF bytes with Docling and export to markdown."""
         
         stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
@@ -109,7 +109,7 @@ class VlmPictureBackend:
                 return None
         return self._vlm_converter
 
-    def extract_page_markdown(self, page_pdf_bytes: bytes, filename: str) -> str:
+    def extract_page_markdown(self, page_pdf_bytes: bytes, filename: str, use_ocr: bool = True) -> str:
         """Run SmolVLM description pipeline on single-page PDF bytes."""
         
         vlm = self._get_vlm_converter()
@@ -133,7 +133,7 @@ class VlmPictureBackend:
             pdf.close()
             return md
 
-    def extract_picture_descriptions_only(self, page_pdf_bytes: bytes, filename: str) -> str:
+    def extract_picture_descriptions_only(self, page_pdf_bytes: bytes, filename: str, use_ocr: bool = True) -> str:
         """Extract only the [Figure description] captions from SmolVLM for pages"""
 
         vlm = self._get_vlm_converter()
