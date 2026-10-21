@@ -1,4 +1,5 @@
 import unittest
+import warnings
 from types import SimpleNamespace
 
 import fitz
@@ -15,17 +16,17 @@ class TestPdfFigures(unittest.TestCase):
         doc = DoclingDocument(name="figure_doc")
         pic = doc.add_picture(caption=None)
 
-        # Attach repetitive hallucinated description
-        pic.annotations.append(
-            PictureDescriptionData(
-                provenance="test_vlm",
-                text="sensor diagram sensor diagram sensor diagram sensor diagram",
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            pic.annotations.append(
+                PictureDescriptionData(
+                    provenance="test_vlm",
+                    text="sensor diagram sensor diagram sensor diagram sensor diagram",
+                )
             )
-        )
 
-        inject_figure_cards(doc)
-        # Verify text was cleared
-        self.assertEqual(pic.annotations[0].text, "")
+            inject_figure_cards(doc)
+            self.assertEqual(pic.annotations[0].text, "")
 
     def test_process_pictures_extracts_labels_and_numbers(self):
         """process_pictures synthesizes figure cards containing diagram callouts and spec numbers."""

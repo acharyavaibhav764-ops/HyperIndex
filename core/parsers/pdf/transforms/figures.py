@@ -1,9 +1,4 @@
-"""v5.9 WP5: Deterministic figure pipeline (labels_only mode).
-
-Builds figure cards from PictureItems without VLM. Called from pdf_router._docling_page().
-"""
-from __future__ import annotations
-
+import hashlib
 import logging
 import re
 import zlib
@@ -14,51 +9,64 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_GENERIC_RE = re.compile(r"^In this (image|picture|diagram|figure)\b", re.I)
-_ZLIB_RATIO_MIN = 0.35
-_NGRAM_REPEATS = 3
+# Minimum compressed/uncompressed ratio to pass the repetition filter
+_ZLIB_RATIO_MIN = 0.40
+
+# Captions starting with these generic phrases carry no useful retrieval information
+_GENERIC_RE = re.compile(
+    r"^(?:this image shows|the image shows|an image of|a photo of|"
+    r"a schematic diagram of|a diagram of|a drawing of|"
+    r"picture of|figure showing|close-up of)\b",
+    re.I,
+)
+
+# Callout / diagram number pattern: single tokens like "1", "2.1", "SF12", "79CM307Z1"
+_PART_NUM_RE = re.compile(r"^[A-Z0-9]{2,12}(?:-[A-Z0-9]{1,6})?$")
+
+
+def _dedup(tokens: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out = []
+    for t in tokens:
+        tl = t.lower()
+        if tl not in seen:
+            seen.add(tl)
+            out.append(t)
+    return out
+
+
+def _has_repeated_ngram(text: str, max_repeats: int = 3) -> bool:
+    """Detect repetitive hallucinated phrases across 2-grams, 3-grams, and 4-grams."""
+    words = text.lower().split()
+    for n in (2, 3, 4):
+        if len(words) < n * max_repeats:
+            continue
+        grams: dict[tuple, int] = {}
+        for i in range(len(words) - n + 1):
+            g = tuple(words[i : i + n])
+            grams[g] = grams.get(g, 0) + 1
+            if grams[g] >= max_repeats:
+                return True
+    return False
 
 
 def _zlib_ratio(text: str) -> float:
     raw = text.encode("utf-8")
-    return len(zlib.compress(raw)) / len(raw) if raw else 1.0
+    if not raw:
+        return 1.0
+    return len(zlib.compress(raw)) / len(raw)
 
 
-def _has_repeated_ngram(text: str, n: int = 4) -> bool:
-    words = text.split()
-    if len(words) < n:
-        return False
-    grams: dict[tuple, int] = {}
-    for i in range(len(words) - n + 1):
-        g = tuple(words[i:i + n])
-        grams[g] = grams.get(g, 0) + 1
-    return any(c >= _NGRAM_REPEATS for c in grams.values())
-
-
-def _dedup(labels: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out = []
-    for l in labels:
-        k = l.strip().lower()
-        if k and k not in seen:
-            seen.add(k)
-            out.append(l.strip())
-    return out
+def _inside_table(bbox: tuple[float, float, float, float], table_bboxes: list[tuple[float, float, float, float]]) -> bool:
+    bx0, by0, bx1, by1 = bbox
+    for tx0, ty0, tx1, ty1 in table_bboxes:
+        if bx0 >= tx0 - 2 and by0 >= ty0 - 2 and bx1 <= tx1 + 2 and by1 <= ty1 + 2:
+            return True
+    return False
 
 
 def _extract_numbers(labels: list[str]) -> list[str]:
-    nums = []
-    for l in labels:
-        nums.extend(re.findall(r"\b\d+(?:\.\d+)?\b", l))
-    return list(dict.fromkeys(nums))
-
-
-def _inside_table(bbox, table_bboxes) -> bool:
-    px0, py0, px1, py1 = bbox
-    for tx0, ty0, tx1, ty1 in table_bboxes:
-        if px0 >= tx0 - 2 and py0 >= ty0 - 2 and px1 <= tx1 + 2 and py1 <= ty1 + 2:
-            return True
-    return False
+    return [lbl for lbl in labels if _PART_NUM_RE.match(lbl)]
 
 
 def process_pictures(
@@ -85,7 +93,7 @@ def process_pictures(
                 pass
 
     cards = []
-    for idx, pic in enumerate(doc.pictures):
+    for idx, pic in enumerate(pictures):
         figure_id = f"fig_p{page_no}_{idx}"
         try:
             card = _build_card(pic, doc, page_fitz, heading_path, figure_id,
@@ -185,15 +193,23 @@ def _generic_caption(text: str) -> bool:
 
 def inject_figure_cards(doc: "DoclingDocument") -> None:
     """Ensure picture elements in DoclingDocument have clean captions without repeating hallucinated n-grams."""
+    import warnings
     from docling_core.types.doc import PictureDescriptionData
+
     for pic in getattr(doc, "pictures", []):
         desc = getattr(getattr(pic, "meta", None), "description", None)
         text = getattr(desc, "text", "") if desc else ""
         if text and (_has_repeated_ngram(text) or _zlib_ratio(text) < _ZLIB_RATIO_MIN):
             desc.text = ""
 
-        if getattr(pic, "annotations", None):
-            for ann in pic.annotations:
-                if isinstance(ann, PictureDescriptionData) and getattr(ann, "text", None):
-                    if _has_repeated_ngram(ann.text) or _zlib_ratio(ann.text) < _ZLIB_RATIO_MIN:
-                        ann.text = ""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                anns = getattr(pic, "annotations", None)
+                if anns:
+                    for ann in anns:
+                        if isinstance(ann, PictureDescriptionData) and getattr(ann, "text", None):
+                            if _has_repeated_ngram(ann.text) or _zlib_ratio(ann.text) < _ZLIB_RATIO_MIN:
+                                ann.text = ""
+            except Exception:
+                pass

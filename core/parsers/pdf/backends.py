@@ -111,17 +111,20 @@ class DoclingTableBackend:
 
         cards = []
         if page_fitz is not None:
-            try:
-                inject_marks(doc, page_fitz, legend=legend, repeat_min=3)
-            except Exception as exc:
-                logger.warning("cellmarks: page %d failed: %s", page_no, exc)
+            cfg = pipeline_config.pipeline_settings
+            if cfg.pdf_v59_cellmarks:
+                try:
+                    inject_marks(doc, page_fitz, legend=legend, repeat_min=cfg.pdf_mark_repeat_min)
+                except Exception as exc:
+                    logger.warning("cellmarks: page %d failed: %s", page_no, exc)
 
-            try:
-                cards = process_pictures(
-                    doc, page_fitz, heading_path=[], page_no=page_no, mode="labels_only"
-                )
-            except Exception as exc:
-                logger.warning("pdf_figures: page %d failed: %s", page_no, exc)
+            if cfg.pdf_figure_mode != "off":
+                try:
+                    cards = process_pictures(
+                        doc, page_fitz, heading_path=[], page_no=page_no, mode=cfg.pdf_figure_mode
+                    )
+                except Exception as exc:
+                    logger.warning("pdf_figures: page %d failed: %s", page_no, exc)
 
             pdf_single.close()
 
@@ -161,30 +164,33 @@ class VlmPictureBackend:
         """Run SmolVLM description pipeline on single-page PDF bytes."""
         
         vlm = self._get_vlm_converter()
+        cfg = pipeline_config.pipeline_settings
 
         # Fall back to Docling table converter           
         if vlm is None:
             stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
             converter = DocumentConverter(allowed_formats=[InputFormat.PDF])
             doc = converter.convert(stream).document
-            try:
-                pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
-                inject_marks(doc, pdf_single[0], legend=legend, repeat_min=3)
-                pdf_single.close()
-            except Exception as exc:
-                logger.warning("cellmarks (fallback path): page %d failed: %s", page_no, exc)
+            if cfg.pdf_v59_cellmarks:
+                try:
+                    pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
+                    inject_marks(doc, pdf_single[0], legend=legend, repeat_min=cfg.pdf_mark_repeat_min)
+                    pdf_single.close()
+                except Exception as exc:
+                    logger.warning("cellmarks (fallback path): page %d failed: %s", page_no, exc)
             return doc.export_to_markdown()
 
         try:
             stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
             doc = vlm.convert(stream).document
             _inject_picture_descriptions(doc)
-            try:
-                pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
-                inject_marks(doc, pdf_single[0], legend=legend, repeat_min=3)
-                pdf_single.close()
-            except Exception as exc:
-                logger.warning("cellmarks (vlm path): page %d failed: %s", page_no, exc)
+            if cfg.pdf_v59_cellmarks:
+                try:
+                    pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
+                    inject_marks(doc, pdf_single[0], legend=legend, repeat_min=cfg.pdf_mark_repeat_min)
+                    pdf_single.close()
+                except Exception as exc:
+                    logger.warning("cellmarks (vlm path): page %d failed: %s", page_no, exc)
             return doc.export_to_markdown()
         except Exception as exc:
             logger.warning("VLM page extraction failed: %s; falling back to PyMuPDF", exc)

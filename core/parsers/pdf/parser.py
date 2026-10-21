@@ -7,6 +7,7 @@ from docling.document_converter import DocumentConverter
 from docling_core.types.doc import DoclingDocument
 from docling_core.types.io import DocumentStream
 
+from core import pipeline_config
 from ..base import BaseParser
 from .backends import (
     DoclingTableBackend,
@@ -66,7 +67,8 @@ class PdfParser(BaseParser):
             page_texts = [p.get_text() for p in pdf]
             raw_texts = page_texts
             vocab = build_vocab(page_texts)
-            ocr_pages = {i for i, t in enumerate(page_texts) if len(t.strip()) < 40}
+            min_chars = pipeline_config.pipeline_settings.pdf_text_layer_min_chars
+            ocr_pages = {i for i, t in enumerate(page_texts) if len(t.strip()) < min_chars}
             tick_legend = scan_legend(page_texts)
 
             # Per-page triage and backend dispatch
@@ -113,7 +115,7 @@ class PdfParser(BaseParser):
             # Merge per-page markdowns into unified DoclingDocument
             combined_doc = merge_pages_to_docling(processed_markdowns, filename)
 
-            # Document-level transformations (headings, captions, echoes, blacklist, visual cellmarks)
+            # Document-level transformations (headings, captions, echoes, blacklist)
             return self.post_processor.process_document(combined_doc, pdf=pdf, vocab=vocab)
 
         finally:

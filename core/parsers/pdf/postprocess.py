@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from collections import Counter
 from docling_core.types.doc import DoclingDocument
 
-from .transforms.cellmarks import inject_marks
+from core import pipeline_config
 from .transforms.cleanup import clean_page_markdown, strip_running_lines
 from .transforms.coverage import check_page, check_page_coverage
 from .transforms.figures import inject_figure_cards
@@ -47,12 +47,21 @@ class PdfPostProcessor:
         processed = [clean_page_markdown(md, vocab=vocab) for md in processed]
 
         # Coverage safety net: recover dropped raw text
-        if raw_texts and len(raw_texts) == len(processed):
+        cfg = pipeline_config.pipeline_settings
+        if cfg.pdf_v59_coverage and raw_texts and len(raw_texts) == len(processed):
             running_lines: set[str] = set()
             repaired: list[str] = []
             for md, raw in zip(processed, raw_texts):
                 try:
-                    repaired.append(check_page(md, raw, running_lines))
+                    repaired.append(
+                        check_page(
+                            md,
+                            raw,
+                            running_lines,
+                            recall_min=cfg.pdf_coverage_recall_min,
+                            near_match_ratio=cfg.pdf_coverage_near_match,
+                        )
+                    )
                 except Exception as exc:
                     logger.warning("Coverage check failed: %s", exc)
                     repaired.append(md)
@@ -66,21 +75,15 @@ class PdfPostProcessor:
         pdf: fitz.Document | None = None,
         vocab: Counter | None = None,
     ) -> DoclingDocument:
-        """Apply AST repairs, cellmarks detection, and heading hierarchy corrections to the merged DoclingDocument."""
+        """Apply AST repairs, caption binding, and heading hierarchy corrections to the merged DoclingDocument."""
         
-        # Visual transforms: detect table availability checkmarks via bounding box collision
-        if pdf is not None:
-            for page in pdf:
-                try:
-                    inject_marks(doc, page)
-                except Exception as exc:
-                    logger.debug("Document-level inject_marks skipped: %s", exc)
+        cfg = pipeline_config.pipeline_settings
 
         # Clean and deduplicate figure cards
         inject_figure_cards(doc)
 
         # Cross-page boilerplate demotion and heading level normalization
-        repair_pdf_headings(doc, min_page_repeats=3)
+        repair_pdf_headings(doc, min_page_repeats=cfg.pdf_boilerplate_min_page_repeats)
 
         # Document-level AST repairs (captions, releveling, echoes, blacklist, vocab cleaning)
         repair_pdf_structure(doc, vocab=vocab)

@@ -68,12 +68,38 @@ class Retriever:
             embeddings=embeddings,
         )
 
-    def retrieve(self, query: str, k: int | None = None) -> dict[str, Any]:
-        """Query ChromaDB for the top-k most semantically similar chunks."""
+    def retrieve(
+        self,
+        query: str,
+        k: int | None = None,
+        *,
+        include_toc: bool = False,
+    ) -> dict[str, Any]:
+        """Query ChromaDB for the top-k most semantically similar chunks.
 
+        Args:
+            query:       The search query string.
+            k:           Number of results to return (defaults to pipeline_settings.retrieval_k).
+            include_toc: When False (default), excludes chunks with content_type='toc'
+                         via Chroma scalar metadata filtering.
+        """
         target_k = k if k is not None else pipeline_settings.retrieval_k
-        return self.collection.query(
-            query_texts=[query],
-            n_results=target_k,
-            include=["documents", "metadatas", "distances"],
-        )
+
+        where: dict[str, Any] | None = None
+        if not include_toc:
+            where = {"content_type": {"$ne": "toc"}}
+
+        try:
+            return self.collection.query(
+                query_texts=[query],
+                n_results=target_k,
+                include=["documents", "metadatas", "distances"],
+                where=where,
+            )
+        except Exception:
+            # Fallback: legacy collections may lack content_type metadata
+            return self.collection.query(
+                query_texts=[query],
+                n_results=target_k,
+                include=["documents", "metadatas", "distances"],
+            )
