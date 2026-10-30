@@ -15,10 +15,10 @@ from docling_core.types.doc import (
 from docling_core.types.io import DocumentStream
 
 from core import pipeline_config
-from ..docling_parser import _build_vlm_converter, _inject_picture_descriptions # Uses VLM methods from docling_parser
-from .transforms.cellmarks import inject_marks
+from ..docling_parser import _build_vlm_converter, _inject_picture_descriptions
+from .config import PdfParserSettings, pdf_parser_settings
+from .pipeline import apply_page_transforms
 from .transforms.cleanup import strip_inline_emphasis
-from .transforms.figures import process_pictures
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,12 @@ def merge_pages_to_docling(
 
 
 class PyMuPdfBackend:
-    """Fast markdown extraction backend for text-heavy PDF pages."""
+    """
+    Fast markdown extraction backend for text-heavy PDF pages.
+
+    Methods:
+        extract_page_markdown()
+    """
 
     @staticmethod
     def extract_page_markdown(pdf: fitz.Document, page_no: int, use_ocr: bool = True) -> str:
@@ -78,10 +83,20 @@ class PyMuPdfBackend:
 
 
 class DoclingTableBackend:
-    """Accurate table extraction backend for table-bearing PDF pages using DocumentConverter."""
+    """
+    Accurate table extraction backend for table-bearing PDF pages using DocumentConverter.
+    
+    Attributes:
+        _converter: 
+        cfg: 
+    
+    Methods:
+        extract_page_markdown()
+    """
 
-    def __init__(self) -> None:
+    def __init__(self, cfg: PdfParserSettings | None = None) -> None:
         self._converter: DocumentConverter | None = None
+        self.cfg = cfg or pdf_parser_settings
 
     def _get_converter(self) -> DocumentConverter:
         if self._converter is None:
@@ -101,32 +116,14 @@ class DoclingTableBackend:
         stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
         doc = self._get_converter().convert(stream).document
 
-        page_fitz = None
-        pdf_single = None
-        try:
-            pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
-            page_fitz = pdf_single[0]
-        except Exception as exc:
-            logger.warning("cellmarks: failed to open single page pdf: %s", exc)
-
-        cards = []
-        if page_fitz is not None:
-            cfg = pipeline_config.pipeline_settings
-            if cfg.pdf_v59_cellmarks:
-                try:
-                    inject_marks(doc, page_fitz, legend=legend, repeat_min=cfg.pdf_mark_repeat_min)
-                except Exception as exc:
-                    logger.warning("cellmarks: page %d failed: %s", page_no, exc)
-
-            if cfg.pdf_figure_mode != "off":
-                try:
-                    cards = process_pictures(
-                        doc, page_fitz, heading_path=[], page_no=page_no, mode=cfg.pdf_figure_mode
-                    )
-                except Exception as exc:
-                    logger.warning("pdf_figures: page %d failed: %s", page_no, exc)
-
-            pdf_single.close()
+        cards = apply_page_transforms(
+            doc=doc,
+            page_pdf_bytes=page_pdf_bytes,
+            page_no=page_no,
+            legend=legend,
+            cfg=self.cfg,
+            extract_figures=True,
+        )
 
         md = doc.export_to_markdown()
         if cards:
@@ -137,10 +134,21 @@ class DoclingTableBackend:
 
 
 class VlmPictureBackend:
-    """Vision-language description backend for image-heavy pages."""
+    """
+    Vision-language description backend for image-heavy pages.
+    
+    Attributes:
+        _vlm_converter:
+        cfg:
 
-    def __init__(self) -> None:
+    Methods:
+        extract_page_markdown()
+        extract_picture_descriptions_only()
+    """
+
+    def __init__(self, cfg: PdfParserSettings | None = None) -> None:
         self._vlm_converter: DocumentConverter | None = None
+        self.cfg = cfg or pdf_parser_settings
 
     def _get_vlm_converter(self) -> DocumentConverter | None:
         if not pipeline_config.pipeline_settings.enable_picture_description:
@@ -162,35 +170,35 @@ class VlmPictureBackend:
         page_no: int = 1,
     ) -> str:
         """Run SmolVLM description pipeline on single-page PDF bytes."""
-        
         vlm = self._get_vlm_converter()
-        cfg = pipeline_config.pipeline_settings
 
         # Fall back to Docling table converter           
         if vlm is None:
             stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
             converter = DocumentConverter(allowed_formats=[InputFormat.PDF])
             doc = converter.convert(stream).document
-            if cfg.pdf_v59_cellmarks:
-                try:
-                    pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
-                    inject_marks(doc, pdf_single[0], legend=legend, repeat_min=cfg.pdf_mark_repeat_min)
-                    pdf_single.close()
-                except Exception as exc:
-                    logger.warning("cellmarks (fallback path): page %d failed: %s", page_no, exc)
+            apply_page_transforms(
+                doc=doc,
+                page_pdf_bytes=page_pdf_bytes,
+                page_no=page_no,
+                legend=legend,
+                cfg=self.cfg,
+                extract_figures=False,
+            )
             return doc.export_to_markdown()
 
         try:
             stream = DocumentStream(name=filename, stream=io.BytesIO(page_pdf_bytes))
             doc = vlm.convert(stream).document
             _inject_picture_descriptions(doc)
-            if cfg.pdf_v59_cellmarks:
-                try:
-                    pdf_single = fitz.open(stream=page_pdf_bytes, filetype="pdf")
-                    inject_marks(doc, pdf_single[0], legend=legend, repeat_min=cfg.pdf_mark_repeat_min)
-                    pdf_single.close()
-                except Exception as exc:
-                    logger.warning("cellmarks (vlm path): page %d failed: %s", page_no, exc)
+            apply_page_transforms(
+                doc=doc,
+                page_pdf_bytes=page_pdf_bytes,
+                page_no=page_no,
+                legend=legend,
+                cfg=self.cfg,
+                extract_figures=False,
+            )
             return doc.export_to_markdown()
         except Exception as exc:
             logger.warning("VLM page extraction failed: %s; falling back to PyMuPDF", exc)
@@ -201,7 +209,6 @@ class VlmPictureBackend:
 
     def extract_picture_descriptions_only(self, page_pdf_bytes: bytes, filename: str, use_ocr: bool = True) -> str:
         """Extract only the [Figure description] captions from SmolVLM for pages"""
-
         vlm = self._get_vlm_converter()
         if vlm is None:
             return ""

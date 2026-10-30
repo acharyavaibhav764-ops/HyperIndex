@@ -81,27 +81,6 @@ class PipelineSettings:
     libreoffice_binary: str = os.getenv("LIBREOFFICE_BINARY", "")
     libreoffice_timeout_seconds: int = int(os.getenv("LIBREOFFICE_TIMEOUT_SECONDS", "60"))
 
-    # PDF Per-Page Triage & Routing
-    enable_pdf_page_router: bool = (
-        os.getenv("ENABLE_PDF_PAGE_ROUTER", "true").lower() == "true"
-    )
-    pdf_min_text_chars_for_text_route: int = int(os.getenv("PDF_MIN_TEXT_CHARS_FOR_TEXT_ROUTE", "800"))
-    pdf_text_layer_min_chars: int = int(os.getenv("PDF_TEXT_LAYER_MIN_CHARS", "40"))
-    pdf_ocr_on_text_pages: bool = os.getenv("PDF_ALLOW_OCR_ON_TEXT_PAGES", "false").lower() == "true"
-    pdf_v57_cleanup: bool = os.getenv("PDF_V57_CLEANUP", "true").lower() == "true"
-    pdf_smolvlm_max_new_tokens: int = int(os.getenv("PDF_SMOLVLM_MAX_NEW_TOKENS", "200"))
-    pdf_boilerplate_min_page_repeats: int = int(os.getenv("PDF_BOILERPLATE_MIN_PAGE_REPEATS", "3"))
-    pdf_debug_heading_dump: bool = bool(int(os.getenv("PDF_DEBUG_HEADING_DUMP", "0")))
-
-    # Visual Domain & Coverage Transforms (v5.9 switches)
-    pdf_v59_cellmarks: bool = os.getenv("PDF_V59_CELLMARKS", "true").lower() == "true"
-    pdf_mark_repeat_min: int = int(os.getenv("PDF_MARK_REPEAT_MIN", "3"))
-    pdf_v59_coverage: bool = os.getenv("PDF_V59_COVERAGE", "true").lower() == "true"
-    pdf_coverage_recall_min: float = float(os.getenv("PDF_COVERAGE_RECALL_MIN", "0.9"))
-    pdf_coverage_near_match: float = float(os.getenv("PDF_COVERAGE_NEAR_MATCH", "0.75"))
-    pdf_figure_mode: str = os.getenv("PDF_FIGURE_MODE", "labels_only")  # off / labels_only / vlm_fallback
-    pdf_v59_table_crosscheck: bool = os.getenv("PDF_V59_TABLE_CROSSCHECK", "true").lower() == "true"
-
 
     # CHUNKER
 

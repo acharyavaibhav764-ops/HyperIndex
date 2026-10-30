@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from collections import Counter
 from docling_core.types.doc import DoclingDocument
 
-from core import pipeline_config
+from .config import pdf_parser_settings
 from .transforms.cleanup import clean_page_markdown, strip_running_lines
 from .transforms.coverage import check_page, check_page_coverage
 from .transforms.figures import inject_figure_cards
@@ -47,8 +47,8 @@ class PdfPostProcessor:
         processed = [clean_page_markdown(md, vocab=vocab) for md in processed]
 
         # Coverage safety net: recover dropped raw text
-        cfg = pipeline_config.pipeline_settings
-        if cfg.pdf_v59_coverage and raw_texts and len(raw_texts) == len(processed):
+        cfg = pdf_parser_settings
+        if cfg.enable_coverage_check and raw_texts and len(raw_texts) == len(processed):
             running_lines: set[str] = set()
             repaired: list[str] = []
             for md, raw in zip(processed, raw_texts):
@@ -58,8 +58,8 @@ class PdfPostProcessor:
                             md,
                             raw,
                             running_lines,
-                            recall_min=cfg.pdf_coverage_recall_min,
-                            near_match_ratio=cfg.pdf_coverage_near_match,
+                            recall_min=cfg.coverage_recall_min,
+                            near_match_ratio=cfg.coverage_near_match,
                         )
                     )
                 except Exception as exc:
@@ -77,13 +77,13 @@ class PdfPostProcessor:
     ) -> DoclingDocument:
         """Apply AST repairs, caption binding, and heading hierarchy corrections to the merged DoclingDocument."""
         
-        cfg = pipeline_config.pipeline_settings
+        cfg = pdf_parser_settings
 
         # Clean and deduplicate figure cards
         inject_figure_cards(doc)
 
         # Cross-page boilerplate demotion and heading level normalization
-        repair_pdf_headings(doc, min_page_repeats=cfg.pdf_boilerplate_min_page_repeats)
+        repair_pdf_headings(doc, min_page_repeats=cfg.boilerplate_min_page_repeats)
 
         # Document-level AST repairs (captions, releveling, echoes, blacklist, vocab cleaning)
         repair_pdf_structure(doc, vocab=vocab)

@@ -7,7 +7,6 @@ from docling.document_converter import DocumentConverter
 from docling_core.types.doc import DoclingDocument
 from docling_core.types.io import DocumentStream
 
-from core import pipeline_config
 from ..base import BaseParser
 from .backends import (
     DoclingTableBackend,
@@ -16,6 +15,7 @@ from .backends import (
     merge_pages_to_docling,
     single_page_bytes,
 )
+from .config import pdf_parser_settings
 from .postprocess import PdfPostProcessor
 from .transforms.cellmarks import scan_legend
 from .transforms.cleanup import build_vocab
@@ -67,7 +67,7 @@ class PdfParser(BaseParser):
             page_texts = [p.get_text() for p in pdf]
             raw_texts = page_texts
             vocab = build_vocab(page_texts)
-            min_chars = pipeline_config.pipeline_settings.pdf_text_layer_min_chars
+            min_chars = pdf_parser_settings.text_layer_min_chars
             ocr_pages = {i for i, t in enumerate(page_texts) if len(t.strip()) < min_chars}
             tick_legend = scan_legend(page_texts)
 
