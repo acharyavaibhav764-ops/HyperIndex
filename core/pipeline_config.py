@@ -28,7 +28,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "   - Format sequential procedures as numbered, chronological steps.\n"
     "   - Format pinouts, switch positions, and technical parameters as Markdown tables or structured bullet points.\n"
     "6. VERIFIABLE CITATIONS: Every factual statement, technical parameter, terminal pinout, and procedure "
-    "step must reference its source document and page number in the format: [Doc: <filename>, Page: <page>]."
+    "step must reference its source document and page number in the format: [Doc: <filename>, Chunk: <chunk_index>]."
 )
 
 DEFAULT_PROMPT_TEMPLATE = (
