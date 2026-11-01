@@ -190,7 +190,10 @@ To ensure production stability and zero downtime, the migration is structured in
   3. **Updated Documentation**:
      - Update architecture diagrams in `README.md` to reflect Qdrant on port 6333.
      - Document Qdrant Web Dashboard URL (`http://localhost:6333/dashboard`).
-  4. **Full Test Suite Run**:
+  4. **Embeddings Consolidation**:
+     - Collapse `SentenceTransformerCallable` directly into `Embeddings`.
+     - Eliminate transitional `__call__` wrapper and redundant list conversions since Qdrant takes vectors directly without Chroma's callback protocol.
+  5. **Full Test Suite Run**:
      - Ensure the entire test suite passes cleanly with zero Chroma dependencies.
 
 * **Testing & Verification**:
