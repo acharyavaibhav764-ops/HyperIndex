@@ -191,7 +191,6 @@ class Chunker:
 
                 meta = {
                     "document_id": file_id,
-                    "file_id": file_id,
                     "filename": filename,
                     "chunk_index": len(metadatas),
                 }
