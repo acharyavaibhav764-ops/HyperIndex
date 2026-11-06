@@ -366,18 +366,26 @@ Verify end-to-end stack startup with Qdrant container running:
 
 ## 6. Validation, Handover & Commit Checklist
 
+### Implementation Notes
+- Implemented the retriever, configuration, Docker service, and nine offline retriever tests.
+- Used a Bash HTTP healthcheck because the pinned Qdrant image does not include `curl`.
+- Pinned `qdrant-client==1.12.0` to match the server; the previous unbounded requirement resolved to an incompatible v1.20 client.
+- Added batch-length, vector-dimension, existing-collection, and positive retrieval-limit validation.
+- Verification: Compose configuration, `/readyz`, and live create/upsert/query using the v1.12 client/server passed; 48 targeted tests passed. One existing generator test still expects page citations instead of the committed chunk citation format.
+- Document CRUD still requires the v4 migration: `DocumentService` uses the removed Chroma `.collection` interface. Its mocked tests pass but do not establish live CRUD compatibility.
+- Existing Chroma vectors are not copied into Qdrant by this milestone.
+
 ### Pre-Commit Checklist (To be verified prior to handover):
-- [ ] `docker-compose.yml` updated with `qdrant` service, healthcheck, and volume.
-- [ ] `config.py` and `.env.example` updated with `QDRANT_*` settings.
-- [ ] `core/retriever.py` rewritten with `QdrantClient`, UUIDv5 mapping, `upsert()`, and `retrieve()`.
-- [ ] `tests/unit/test_retriever.py` implemented with 100% passing tests using in-memory mode.
-- [ ] Git status confirms only the target files for Version 2.0 are modified.
+- [x] `docker-compose.yml` updated with `qdrant` service, healthcheck, and volume.
+- [x] `config.py` and `.env.example` updated with `QDRANT_*` settings.
+- [x] `core/retriever.py` rewritten with `QdrantClient`, UUIDv5 mapping, `upsert()`, and `retrieve()`.
+- [x] `tests/unit/test_retriever.py` implemented with 100% passing tests using in-memory mode.
+- [x] Diff reviewed: v2 files plus the client dependency pin; pre-existing documentation archive moves preserved.
 
 ### User Commit Instruction:
 Once verification is complete, the changes will be handed over to the user to commit on the current branch using:
 
 ```bash
-git add docker-compose.yml config.py .env.example core/retriever.py tests/unit/test_retriever.py docs/qdrant_v2.md
+git add docker-compose.yml config.py .env.example core/retriever.py requirements.txt tests/unit/test_retriever.py docs/qdrant_v2.md
 git commit -m "feat(retriever): implement Qdrant-backed Retriever and add docker infrastructure"
 ```
-
