@@ -81,7 +81,6 @@ class Chunker:
                 metadatas.append(
                     {
                         "document_id": file_id,
-                        "file_id": file_id,
                         "filename": filename,
                         "page": page_number,
                         "chunk_index": len(metadatas),
@@ -155,7 +154,6 @@ class Chunker:
 
             meta: dict[str, Any] = {
                 "document_id": file_id,
-                "file_id": file_id,
                 "filename": filename,
                 "chunk_index": len(metadatas),
             }
@@ -193,7 +191,6 @@ class Chunker:
 
                 meta = {
                     "document_id": file_id,
-                    "file_id": file_id,
                     "filename": filename,
                     "chunk_index": len(metadatas),
                 }
