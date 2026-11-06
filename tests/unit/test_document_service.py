@@ -1,7 +1,8 @@
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
+from qdrant_client import QdrantClient, models
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -23,10 +24,11 @@ class TestDocumentService(unittest.TestCase):
         self.SessionLocal = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
         self.db: Session = self.SessionLocal()
 
-        # 2. Setup mock Chroma retriever and MinIO uploader
+        # 2. Setup mock Qdrant retriever and MinIO uploader
         self.mock_retriever = MagicMock()
-        self.mock_collection = MagicMock()
-        self.mock_retriever.collection = self.mock_collection
+        self.mock_client = MagicMock()
+        self.mock_retriever.client = self.mock_client
+        self.mock_retriever.collection_name = "test_collection"
 
         self.mock_uploader = MagicMock()
         self.mock_uploader.bucket_name = "test-honeywell-bucket"
@@ -71,8 +73,8 @@ class TestDocumentService(unittest.TestCase):
         self._seed_document(document_id="d2", product_id="prodA", filename="a2.pdf", sha256="h2")
         self._seed_document(document_id="d3", product_id="prodB", filename="b1.pdf", sha256="h3")
 
-        # Mock Chroma returning 5 chunks per document
-        self.mock_collection.get.return_value = {"ids": ["c1", "c2", "c3", "c4", "c5"]}
+        # Mock Qdrant returning 5 chunks per document
+        self.mock_client.count.return_value = models.CountResult(count=5)
 
         response = self.service.list_documents(product_id="prodA")
         self.assertEqual(response.total_count, 2)
@@ -83,7 +85,7 @@ class TestDocumentService(unittest.TestCase):
     def test_list_documents_name_search_substring(self):
         self._seed_document(document_id="d1", filename="Honeywell_Installation_Guide.pdf", sha256="h1")
         self._seed_document(document_id="d2", filename="Circuit_Schematic.pdf", sha256="h2")
-        self.mock_collection.get.return_value = {"ids": ["c1"]}
+        self.mock_client.count.return_value = models.CountResult(count=1)
 
         response = self.service.list_documents(name_search="installation")
         self.assertEqual(response.total_count, 1)
@@ -92,7 +94,7 @@ class TestDocumentService(unittest.TestCase):
     def test_list_documents_pagination_skip_and_limit(self):
         for i in range(5):
             self._seed_document(document_id=f"doc-{i}", filename=f"file_{i}.pdf", sha256=f"hash_{i}")
-        self.mock_collection.get.return_value = {"ids": []}
+        self.mock_client.count.return_value = models.CountResult(count=0)
 
         response = self.service.list_documents(limit=2, skip=1)
         self.assertEqual(response.total_count, 5)
@@ -102,13 +104,20 @@ class TestDocumentService(unittest.TestCase):
 
     def test_get_document_success(self):
         doc = self._seed_document(document_id="target-doc", filename="target.pdf")
-        self.mock_collection.get.return_value = {"ids": ["c1", "c2"]}
+        self.mock_client.count.return_value = models.CountResult(count=2)
 
         detail = self.service.get_document("target-doc")
         self.assertEqual(detail.document_id, "target-doc")
         self.assertEqual(detail.filename, "target.pdf")
         self.assertEqual(detail.total_chunks, 2)
         self.assertEqual(detail.status, "indexed")
+        self.mock_client.count.assert_called_once_with(
+            collection_name="test_collection",
+            count_filter=models.Filter(must=[models.FieldCondition(
+                key="document_id", match=models.MatchValue(value="target-doc"),
+            )]),
+            exact=True,
+        )
 
     def test_get_document_not_found_raises_404(self):
         with self.assertRaises(HTTPException) as ctx:
@@ -119,20 +128,14 @@ class TestDocumentService(unittest.TestCase):
     def test_get_document_chunks_transparency(self):
         self._seed_document(document_id="doc-with-chunks", filename="specs.pdf")
 
-        # Chroma response with documents and metadatas
-        self.mock_collection.get.side_effect = [
-            # First call for paginated chunks
-            {
-                "ids": ["doc_c0", "doc_c1"],
-                "documents": ["Chunk 0 text content", "Chunk 1 text content"],
-                "metadatas": [
-                    {"page": 1, "chunk_index": 0, "product_id": "p1"},
-                    {"page": 2, "chunk_index": 1, "product_id": "p1"},
-                ],
-            },
-            # Second call for total chunk count
-            {"ids": ["doc_c0", "doc_c1"]},
-        ]
+        # Qdrant response with text and metadata payloads
+        self.mock_client.scroll.return_value = ([
+            models.Record(id=i, payload={
+                "chunk_id": f"doc_c{i}", "text": f"Chunk {i} text content",
+                "page": i + 1, "chunk_index": i, "product_id": "p1",
+            }) for i in range(2)
+        ], None)
+        self.mock_client.count.return_value = models.CountResult(count=2)
 
         chunks_res = self.service.get_document_chunks("doc-with-chunks", limit=10, offset=0)
         self.assertEqual(chunks_res.document_id, "doc-with-chunks")
@@ -142,17 +145,13 @@ class TestDocumentService(unittest.TestCase):
         self.assertEqual(chunks_res.chunks[0].text, "Chunk 0 text content")
         self.assertEqual(chunks_res.chunks[0].page, 1)
         self.assertEqual(chunks_res.chunks[1].page, 2)
+        self.assertNotIn("text", chunks_res.chunks[0].metadata)
+        self.assertIsNone(self.mock_client.scroll.call_args.kwargs["offset"])
 
-    def test_update_document_metadata_syncs_sqlite_and_chroma(self):
+    def test_update_document_metadata_syncs_sqlite_and_qdrant(self):
         self._seed_document(document_id="update-doc", product_id="old-prod")
 
-        self.mock_collection.get.return_value = {
-            "ids": ["c0", "c1"],
-            "metadatas": [
-                {"document_id": "update-doc", "page": 1, "product_id": "old-prod"},
-                {"document_id": "update-doc", "page": 2, "product_id": "old-prod"},
-            ],
-        }
+        self.mock_client.count.return_value = models.CountResult(count=2)
 
         updated = self.service.update_document_metadata("update-doc", "new-prod")
         self.assertEqual(updated.product_id, "new-prod")
@@ -161,23 +160,38 @@ class TestDocumentService(unittest.TestCase):
         db_doc = self.db.query(Document).filter_by(document_id="update-doc").first()
         self.assertEqual(db_doc.product_id, "new-prod")
 
-        # Verify Chroma collection.update was called with updated metadata
-        self.mock_collection.update.assert_called_once_with(
-            ids=["c0", "c1"],
-            metadatas=[
-                {"document_id": "update-doc", "page": 1, "product_id": "new-prod"},
-                {"document_id": "update-doc", "page": 2, "product_id": "new-prod"},
-            ],
+        # Verify Qdrant set_payload was called with updated metadata
+        self.mock_client.set_payload.assert_called_once_with(
+            collection_name="test_collection",
+            payload={"product_id": "new-prod"},
+            points=models.Filter(must=[models.FieldCondition(
+                key="document_id", match=models.MatchValue(value="update-doc"),
+            )]),
+            wait=True,
         )
+        self.assertEqual(updated.total_chunks, 2)
+        self.mock_client.scroll.assert_not_called()
 
     def test_delete_document_strict_cascade_sequence(self):
         self._seed_document(document_id="cascade-doc")
-        self.mock_collection.get.return_value = {"ids": ["chunk1", "chunk2", "chunk3"]}
+        self.mock_client.count.return_value = models.CountResult(count=3)
 
-        res = self.service.delete_document("cascade-doc")
+        sequence = MagicMock()
+        sequence.attach_mock(self.mock_client.delete, "vectors")
+        sequence.attach_mock(self.mock_s3_client.delete_object, "storage")
+        with patch.object(self.db, "commit", wraps=self.db.commit) as commit:
+            sequence.attach_mock(commit, "sql_commit")
+            res = self.service.delete_document("cascade-doc")
+        self.assertEqual([call[0] for call in sequence.mock_calls], ["vectors", "sql_commit", "storage"])
 
-        # 1. Verify Chroma vectors deleted
-        self.mock_collection.delete.assert_called_once_with(where={"document_id": "cascade-doc"})
+        # 1. Verify Qdrant vectors deleted
+        self.mock_client.delete.assert_called_once_with(
+            collection_name="test_collection",
+            points_selector=models.FilterSelector(filter=models.Filter(must=[models.FieldCondition(
+                key="document_id", match=models.MatchValue(value="cascade-doc"),
+            )])),
+            wait=True,
+        )
         self.assertEqual(res.deleted_chunks, 3)
 
         # 2. Verify SQLite row deleted
@@ -196,7 +210,7 @@ class TestDocumentService(unittest.TestCase):
     def test_delete_document_liberates_sha256_hash(self):
         unique_hash = "f7c3bc1d808e04732adf679965ccc34ca7ae3441"
         self._seed_document(document_id="hash-doc", sha256=unique_hash)
-        self.mock_collection.get.return_value = {"ids": ["c1"]}
+        self.mock_client.count.return_value = models.CountResult(count=1)
 
         # Document exists before deletion
         pre_check = self.db.query(Document).filter_by(sha256=unique_hash).first()
@@ -209,7 +223,83 @@ class TestDocumentService(unittest.TestCase):
         post_check = self.db.query(Document).filter_by(sha256=unique_hash).first()
         self.assertIsNone(post_check)
 
+    def test_missing_documents_do_not_call_qdrant(self):
+        for operation in (
+            lambda: self.service.get_document_chunks("missing"),
+            lambda: self.service.update_document_metadata("missing", "new"),
+            lambda: self.service.delete_document("missing"),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                operation()
+            self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(self.mock_client.mock_calls, [])
+
+    def test_delete_failure_preserves_sql_and_storage(self):
+        self._seed_document()
+        self.mock_client.count.return_value = models.CountResult(count=1)
+        self.mock_client.delete.side_effect = RuntimeError("Qdrant unavailable")
+        with self.assertRaises(RuntimeError):
+            self.service.delete_document("doc-1")
+        self.assertIsNotNone(self.db.get(Document, "doc-1"))
+        self.mock_s3_client.delete_object.assert_not_called()
+
+    def test_delete_without_vectors_and_storage_failure(self):
+        self._seed_document()
+        self.mock_client.count.return_value = models.CountResult(count=0)
+        self.mock_s3_client.delete_object.side_effect = RuntimeError("MinIO unavailable")
+        result = self.service.delete_document("doc-1")
+        self.assertEqual(result.deleted_chunks, 0)
+        self.assertTrue(result.database_removed)
+        self.assertFalse(result.storage_removed)
+        self.mock_client.delete.assert_not_called()
+
+    def test_real_qdrant_pagination_and_document_isolation(self):
+        from core.retriever import Retriever
+
+        client = QdrantClient(":memory:")
+        self.addCleanup(client.close)
+        embeddings = MagicMock()
+        embeddings.embed.return_value = [[1.0, 0.0]]
+        retriever = Retriever(embeddings, client, "test_collection")
+        service = DocumentService(self.db, retriever, self.mock_uploader)
+        for document_id, count in [("target", 260), ("other", 2)]:
+            self._seed_document(document_id=document_id, sha256=document_id)
+            retriever.upsert(
+                [f"{document_id}_c{i}" for i in range(count)],
+                [f"Text {i}" for i in range(count)],
+                [{"document_id": document_id, "chunk_index": i, "page": 1,
+                  "product_id": "old", "page_numbers": [1, 2]} for i in range(count)],
+                [[1.0, 0.0]] * count,
+            )
+
+        full = service.get_document_chunks("target", limit=300)
+        for offset in (0, 1, 256, 259, 260, 500):
+            with self.subTest(offset=offset):
+                page = service.get_document_chunks("target", limit=2, offset=offset)
+                self.assertEqual(page.total_chunks, 260)
+                self.assertEqual(page.chunks, full.chunks[offset:offset + 2])
+        updated = service.update_document_metadata("target", "new")
+        self.assertEqual(updated.total_chunks, 260)
+        chunks = service.get_document_chunks("target", limit=300).chunks
+        self.assertTrue(all(chunk.metadata["product_id"] == "new" for chunk in chunks))
+        self.assertEqual(chunks[0].metadata["page_numbers"], [1, 2])
+        self.assertEqual(chunks[0].text, full.chunks[0].text)
+        self.assertEqual(service.get_document_chunks("other").chunks[0].metadata["product_id"], "old")
+        result = service.delete_document("target")
+        self.assertEqual(result.deleted_chunks, 260)
+        self.assertEqual(client.count("test_collection").count, 2)
+        self.assertIsNone(self.db.get(Document, "target"))
+        self.assertIsNotNone(self.db.get(Document, "other"))
+
+    def test_chunk_payload_fallback(self):
+        self._seed_document()
+        self.mock_client.count.return_value = models.CountResult(count=1)
+        self.mock_client.scroll.return_value = ([models.Record(id=42, payload=None)], None)
+        chunk = self.service.get_document_chunks("doc-1").chunks[0]
+        self.assertEqual(chunk.chunk_id, "42")
+        self.assertEqual(chunk.text, "")
+        self.assertEqual(chunk.metadata, {})
+
 
 if __name__ == "__main__":
     unittest.main()
-

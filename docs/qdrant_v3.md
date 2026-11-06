@@ -221,7 +221,7 @@ Verify that the full stack with live Qdrant and API container runs without error
 - [x] `api/v1/endpoints/query.py` updated with Qdrant router description.
 - [x] `api/v1/endpoints/documents.py` updated with Qdrant router description.
 - [x] `tests/integration/test_qdrant_pipeline.py` created and passing 100%.
-- [ ] Existing service unit tests (`tests/v0.5/v0.5.1/test_services.py`) pass without regressions.
+- [x] Existing service unit tests (`tests/v0.5/v0.5.1/test_services.py`) pass without regressions.
 - [x] Git status confirms only the target files for Version 3.0 are modified.
 
 ### Implementation & Verification Results
