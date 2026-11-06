@@ -26,7 +26,7 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
     summary="Upload and ingest documents",
     description=(
         "Upload one or more documents, parse text, chunk, generate embeddings, "
-        "and index them in ChromaDB synchronously."
+        "and index them in Qdrant synchronously."
     ),
 )
 async def ingest_documents(
@@ -138,4 +138,3 @@ async def delete_document(
 ) -> DeleteDocumentResponse:
     
     return service.delete_document(document_id=document_id)
-

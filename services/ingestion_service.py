@@ -114,10 +114,13 @@ class IngestionService:
             # Chunk text and attach metadata
             chunks, metadatas, chunk_ids = self.chunker.split(pages, doc_id, filename)
 
+            for meta in metadatas:
+                meta["product_id"] = product_id
+
             # Generate vector embeddings
             vectors = self.embeddings.embed(chunks)
 
-            # Persist to ChromaDB
+            # Persist to Qdrant
             self.retriever.upsert(
                 ids=chunk_ids,
                 documents=chunks,

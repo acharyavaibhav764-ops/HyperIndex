@@ -12,7 +12,7 @@ router = APIRouter(tags=["Query"])
     "/query",
     response_model=QueryResponse,
     summary="Query RAG pipeline",
-    description="Retrieve relevant ChromaDB chunks and generate an answer using Ollama.",
+    description="Retrieve relevant document chunks from Qdrant and generate an answer using Ollama.",
 )
 async def query_pipeline(
     request: QueryRequest,
