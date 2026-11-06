@@ -89,7 +89,7 @@ STRICT OPERATIONAL RULES:
 
 ### 3.1 Context & Query Structure
 
-The prompt template organizes retrieved ChromaDB chunks into clearly delimited sections with metadata headers, sets explicit user instructions, and presents the user's question.
+The prompt template organizes retrieved Qdrant chunks into clearly delimited sections with metadata headers, sets explicit user instructions, and presents the user's question.
 
 ### 3.2 Prompt Template Specification
 

@@ -90,7 +90,7 @@ async def get_document(
     "/{document_id}/chunks",
     response_model=GetDocumentChunksResponse,
     summary="Get document chunks",
-    description="Inspect extracted text chunks and chunk-level metadata stored in ChromaDB.",
+    description="Inspect extracted text chunks and chunk-level metadata stored in Qdrant.",
 )
 async def get_document_chunks(
     document_id: str,
@@ -111,7 +111,7 @@ async def get_document_chunks(
     "/{document_id}",
     response_model=DocumentDescription,
     summary="Update document metadata",
-    description="Update metadata attributes (such as product_id) across SQLite and all associated chunks in ChromaDB.",
+    description="Update metadata attributes (such as product_id) across SQLite and all associated chunks in Qdrant.",
 )
 async def update_document_metadata(
     document_id: str,
@@ -130,7 +130,7 @@ async def update_document_metadata(
     "/{document_id}",
     response_model=DeleteDocumentResponse,
     summary="Delete document",
-    description="Irreversibly delete a document and cascade deletion across ChromaDB vectors, SQLite metadata, and MinIO storage.",
+    description="Irreversibly delete a document and cascade deletion across Qdrant vectors, SQLite metadata, and MinIO storage.",
 )
 async def delete_document(
     document_id: str,

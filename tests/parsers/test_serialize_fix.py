@@ -36,7 +36,7 @@ def _make_pptx_with_heading_only_slide() -> bytes:
     layouts = prs.slide_layouts
 
     for title_text, body_text in [
-        ("Architecture Overview", "Upload -> Parse -> Embed -> ChromaDB."),
+        ("Architecture Overview", "Upload -> Parse -> Embed -> Qdrant."),
         ("Proposed Outcomes", ""),           # heading-only slide — no body
         ("Conclusion", "The system works."),
     ]:
@@ -253,5 +253,4 @@ class TestBugBFix_MultiPageMetadata:
             if 1 in parsed_pages and 2 in parsed_pages:
                 # Success!
                 pass
-
 

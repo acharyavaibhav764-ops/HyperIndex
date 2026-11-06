@@ -17,22 +17,6 @@ services:
       timeout: 5s
       retries: 5
 
-  chroma:
-    image: docker.io/chromadb/chroma:0.5.15
-    container_name: honeywell_chroma
-    environment:
-      IS_PERSISTENT: "TRUE"
-      ANONYMIZED_TELEMETRY: "FALSE"
-    ports:
-      - "8001:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
   qdrant:
     image: docker.io/qdrant/qdrant:v1.12.0
     container_name: honeywell_qdrant
@@ -84,8 +68,6 @@ services:
     depends_on:
       minio:
         condition: service_healthy
-      chroma:
-        condition: service_healthy
       qdrant:
         condition: service_healthy
       ollama:
@@ -97,9 +79,6 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-honeywell-files}
-      CHROMA_HOST: chroma
-      CHROMA_PORT: "8000"
-      CHROMA_COLLECTION: ${CHROMA_COLLECTION:-my_documents}
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-honeywell_documents}
@@ -111,9 +90,14 @@ services:
     volumes:
       - .:/code
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
 volumes:
   minio_data:
-  chroma_data:
   qdrant_data:
   ollama_data:

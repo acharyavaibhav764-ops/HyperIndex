@@ -39,7 +39,7 @@ venv.bak/
 # ==============================================================================
 # Data, Storage & Vector Databases (Local / Docker volumes)
 # ==============================================================================
-chroma_data/
+qdrant_data/
 *.db
 
 # Editor Settings

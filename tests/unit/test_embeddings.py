@@ -1,12 +1,12 @@
 import importlib
 import unittest
 from unittest.mock import MagicMock, patch
+import numpy as np
 
 import core.pipeline_config as pipeline_cfg
 from core.embeddings import (
     DEFAULT_FALLBACK_MODEL,
     Embeddings,
-    SentenceTransformerCallable,
 )
 
 
@@ -18,8 +18,7 @@ class TestEmbeddingsConfiguration(unittest.TestCase):
         """MiniLM model name should load via SentenceTransformer."""
         emb = Embeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         self.assertEqual(emb.model_name, "sentence-transformers/all-MiniLM-L6-v2")
-        self.assertIsInstance(emb.function, SentenceTransformerCallable)
-        self.assertEqual(emb.function.model_name, "sentence-transformers/all-MiniLM-L6-v2")
+        self.assertIs(emb._model, mock_st_cls.return_value)
         mock_st_cls.assert_called_with("sentence-transformers/all-MiniLM-L6-v2", device="cpu")
 
     def test_codebase_default_model_fallback(self):
@@ -40,8 +39,7 @@ class TestEmbeddingsConfiguration(unittest.TestCase):
         """Custom model name should be passed directly to SentenceTransformer."""
         emb = Embeddings(model_name="BAAI/bge-base-en-v1.5", device="cpu")
         self.assertEqual(emb.model_name, "BAAI/bge-base-en-v1.5")
-        self.assertIsInstance(emb.function, SentenceTransformerCallable)
-        self.assertEqual(emb.function.model_name, "BAAI/bge-base-en-v1.5")
+        self.assertIs(emb._model, mock_st_cls.return_value)
         mock_st_cls.assert_called_with("BAAI/bge-base-en-v1.5", device="cpu")
 
     @patch("core.embeddings.SentenceTransformer")
@@ -52,14 +50,15 @@ class TestEmbeddingsConfiguration(unittest.TestCase):
         mock_st_cls.assert_called_with("BAAI/bge-small-en-v1.5", device="cuda")
 
     @patch("core.embeddings.SentenceTransformer")
-    def test_explicit_embedding_function_override(self, mock_st_cls):
-        """Assigning an explicit function attribute should override vector generation (mocking support)."""
+    def test_model_encode_delegation(self, mock_st_cls):
+        """Embedding generation delegates directly to the loaded model."""
         emb = Embeddings()
-        mock_fn = MagicMock(return_value=[[0.1, 0.2, 0.3]])
-        emb.function = mock_fn
+        mock_st_cls.return_value.encode.return_value = [[0.1, 0.2, 0.3]]
 
         res = emb.embed(["sample query"])
-        mock_fn.assert_called_once_with(["sample query"])
+        mock_st_cls.return_value.encode.assert_called_once_with(
+            ["sample query"], convert_to_numpy=True, normalize_embeddings=True,
+        )
         self.assertEqual(res, [[0.1, 0.2, 0.3]])
 
     @patch("core.embeddings.SentenceTransformer")
@@ -78,13 +77,14 @@ class TestEmbeddingsConfiguration(unittest.TestCase):
     def test_fallback_when_model_load_fails(self, mock_st_cls):
         """If a specified model fails to load, it should log a warning and fall back to MiniLM."""
         # Fail on first call (custom model), succeed on second call (fallback model)
+        fallback_model = MagicMock()
         mock_st_cls.side_effect = [
             ValueError("Model not found on HuggingFace Hub"),
-            MagicMock(),
+            fallback_model,
         ]
         emb = Embeddings(model_name="nonexistent/invalid-model")
-        self.assertIsInstance(emb.function, SentenceTransformerCallable)
-        self.assertEqual(emb.function.model_name, DEFAULT_FALLBACK_MODEL)
+        self.assertIs(emb._model, fallback_model)
+        mock_st_cls.assert_called_with(DEFAULT_FALLBACK_MODEL, device=emb.device)
         self.assertEqual(mock_st_cls.call_count, 2)
 
     @patch("core.embeddings.SentenceTransformer")
@@ -92,12 +92,13 @@ class TestEmbeddingsConfiguration(unittest.TestCase):
         """Calling embed([]) should return an empty list without error."""
         emb = Embeddings()
         self.assertEqual(emb.embed([]), [])
+        mock_st_cls.return_value.encode.assert_not_called()
 
     @patch("core.embeddings.SentenceTransformer")
     def test_embedding_output_structure(self, mock_st_cls):
         """Valid text input should produce normalized float lists with expected dimension."""
         mock_instance = MagicMock()
-        mock_instance.encode.return_value = [[0.05] * 384]
+        mock_instance.encode.return_value = np.array([[0.05] * 384], dtype=np.float32)
         mock_st_cls.return_value = mock_instance
 
         emb = Embeddings(model_name="all-minilm-l6-v2")
@@ -111,13 +112,13 @@ class TestEmbeddingsConfiguration(unittest.TestCase):
 
     @patch("core.embeddings.SentenceTransformer")
     def test_callable_protocol_compatibility(self, mock_st_cls):
-        """The embedding function must be directly callable matching ChromaDB's required protocol."""
+        """The function alias remains directly callable."""
         mock_instance = MagicMock()
         mock_instance.encode.return_value = [[0.1, 0.2, 0.3]]
         mock_st_cls.return_value = mock_instance
 
         emb = Embeddings(model_name="all-minilm-l6-v2")
-        # Direct call simulating ChromaDB's query_texts callback
+        self.assertEqual(emb.function, emb.embed)
         callback_res = emb.function(["test query"])
 
         self.assertEqual(callback_res, [[0.1, 0.2, 0.3]])

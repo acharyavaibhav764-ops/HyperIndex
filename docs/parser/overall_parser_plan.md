@@ -32,7 +32,7 @@ The goal of this architecture is to replace ad-hoc, brittle text extractors with
              (HybridChunker + contextualize())
                           │
                           ▼
-                 ChromaDB Embeddings
+                   Qdrant Vectors
 ```
 
 ---
@@ -190,4 +190,3 @@ tests/
 2. **Public API Immutability:** The ingestion response schema (`POST /api/v1/documents`), status codes, and query endpoints remain strictly backward-compatible.
 3. **Comment & Docstring Integrity:** Existing comments, docstrings, and architectural rationale must be preserved during edits.
 4. **Additive Transitions:** New parsers and routers operate alongside legacy implementations until explicit cutover milestones (v4 for ingestion, v5 for deep PDF).
-

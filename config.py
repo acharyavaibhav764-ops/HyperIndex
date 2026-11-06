@@ -15,12 +15,6 @@ class Settings:
     minio_access_key: str = os.getenv("MINIO_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", ""))
     minio_secret_key: str = os.getenv("MINIO_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", ""))
 
-    # ChromaDB
-    chroma_host: str | None = os.getenv("CHROMA_HOST")
-    chroma_port: int = int(os.getenv("CHROMA_PORT", "8000"))
-    chroma_path: str = os.getenv("CHROMA_PATH", "./chroma_data")
-    chroma_collection: str = os.getenv("CHROMA_COLLECTION", "my_documents")
-
     # Qdrant Vector Store
     qdrant_host: str | None = os.getenv("QDRANT_HOST")
     qdrant_port: int = int(os.getenv("QDRANT_PORT", "6333"))
