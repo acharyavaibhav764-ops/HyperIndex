@@ -169,8 +169,10 @@ class DocumentService:
         cursor = None
         remaining = offset
         
-        # Qdrant uses point-ID cursors; the API offset counts skipped chunks.
+        # Return a maximum of 50 chunks ahead of offset value passed using Qdrant cursor
         if offset < total_chunks:
+
+            # Skip chunks and move Qdrant pointer to offset
             while remaining:
                 skipped, cursor = self.retriever.client.scroll(
                     collection_name=self.retriever.collection_name,
@@ -183,6 +185,8 @@ class DocumentService:
                 remaining -= len(skipped)
                 if not skipped or cursor is None:
                     break
+
+            # Fetch the chunks falling under the filter of offset and limit
             if offset == 0 or (remaining == 0 and cursor is not None):
                 records, _ = self.retriever.client.scroll(
                     collection_name=self.retriever.collection_name,

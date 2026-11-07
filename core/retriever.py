@@ -14,8 +14,8 @@ class Retriever:
     
     Attributes:
         embeddings
-        client
         collection_name
+        client
         vector_size
 
     Methods:
@@ -64,14 +64,14 @@ class Retriever:
         vectors = self.client.get_collection(self.collection_name).config.params.vectors
         if (
             not isinstance(vectors, models.VectorParams)
-            or vectors.size != self.vector_size
-            or vectors.distance != models.Distance.COSINE
+            or vectors.size != self.vector_size # Vector embedding size
+            or vectors.distance != models.Distance.COSINE # Distance metric
         ):
             raise ValueError("Qdrant collection must match the embedding dimension and use cosine distance")
 
     @staticmethod
     def chunk_id_to_uuid(chunk_id: str) -> str:
-        """Map a chunk ID to a deterministic Qdrant point UUID."""
+        """Map a chunk ID to a Qdrant point UUID."""
 
         return str(uuid5(NAMESPACE_DNS, chunk_id))
 
@@ -91,6 +91,7 @@ class Retriever:
         if any(len(vector) != self.vector_size for vector in embeddings):
             raise ValueError("Embedding dimensions must match the Qdrant collection")
 
+        # Create Qdrant point objects from chunks
         points = [
             models.PointStruct(
                 id=self.chunk_id_to_uuid(chunk_id),
@@ -99,6 +100,8 @@ class Retriever:
             )
             for chunk_id, text, metadata, vector in zip(ids, documents, metadatas, embeddings)
         ]
+
+        # Upsert chunks as point objects in Qdrant
         self.client.upsert(
             collection_name=self.collection_name,
             points=points,
@@ -111,12 +114,17 @@ class Retriever:
         target_k = k if k is not None else pipeline_settings.retrieval_k
         if target_k < 1:
             raise ValueError("Retrieval limit must be positive")
+
+        # Semantic search
         result = self.client.query_points(
             collection_name=self.collection_name,
             query=self.embeddings.embed([query])[0],
             limit=target_k,
             with_payload=True,
         )
+
+        # Compile result chunk payloads as three separate lists
+        # Remnant of older ChromaDB conventions
         documents = []
         metadatas = []
         distances = []
