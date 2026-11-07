@@ -8,7 +8,7 @@ class DocumentDescription(BaseModel):
     product_id: str = Field(..., description="Product identifier tag")
     size_bytes: int = Field(..., description="File size in bytes")
     sha256: str = Field(..., description="SHA-256 fingerprint for deduplication")
-    total_chunks: int = Field(..., description="Number of text chunks indexed in ChromaDB")
+    total_chunks: int = Field(..., description="Number of text chunks indexed in Qdrant")
     status: str = Field(default="indexed", description="Indexing status")
     created_at: datetime = Field(..., description="Timestamp when document was ingested")
 
@@ -21,7 +21,7 @@ class GetDocumentsResponse(BaseModel):
 
 
 class ChunkDescription(BaseModel):
-    chunk_id: str = Field(..., description="Unique chunk vector ID in ChromaDB")
+    chunk_id: str = Field(..., description="Original chunk identifier stored in the Qdrant payload")
     chunk_index: int = Field(..., description="Index of the chunk in document")
     page: int | str = Field(..., description="Page number of origin")
     text: str = Field(..., description="Extracted text chunk content")
@@ -31,7 +31,7 @@ class ChunkDescription(BaseModel):
 class GetDocumentChunksResponse(BaseModel):
     document_id: str = Field(..., description="Unique document UUID")
     filename: str = Field(..., description="Original filename")
-    total_chunks: int = Field(..., description="Total chunks in ChromaDB for this document")
+    total_chunks: int = Field(..., description="Total chunks in Qdrant for this document")
     chunks: list[ChunkDescription] = Field(..., description="Retrieved chunks")
 
 
@@ -42,6 +42,6 @@ class UpdateDocumentRequest(BaseModel):
 class DeleteDocumentResponse(BaseModel):
     document_id: str = Field(..., description="Document ID that was deleted")
     status: str = Field(default="deleted", description="Deletion status")
-    deleted_chunks: int = Field(..., description="Number of vectors removed from ChromaDB")
+    deleted_chunks: int = Field(..., description="Number of vectors removed from Qdrant")
     database_removed: bool = Field(default=True, description="Whether SQL record was deleted")
     storage_removed: bool = Field(default=True, description="Whether raw MinIO binary was deleted")

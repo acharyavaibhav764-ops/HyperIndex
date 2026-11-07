@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
-from typing import Any
 from fastapi import HTTPException, status
+from qdrant_client import models
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 
 class DocumentService:
     """
-    Coordinates document lifecycle operations across SQLite, ChromaDB, and MinIO.
+    Coordinates document lifecycle operations across SQLite, Qdrant, and MinIO.
     
     Attributes:
         db: SQLAlchemy session for metadata & deduplication tracking
-        retriever: Retriever providing access to ChromaDB collection
+        retriever: Retriever providing access to Qdrant client
         uploader: Uploader providing access to MinIO S3 client
 
     Methods:
@@ -46,6 +46,19 @@ class DocumentService:
         self.db = db
         self.retriever = retriever
         self.uploader = uploader
+
+    @staticmethod
+    def _make_document_filter(document_id: str) -> models.Filter:
+        return models.Filter(must=[
+            models.FieldCondition(key="document_id", match=models.MatchValue(value=document_id))
+        ])
+
+    def _count_chunks(self, document_id: str) -> int:
+        return self.retriever.client.count(
+            collection_name=self.retriever.collection_name,
+            count_filter=self._make_document_filter(document_id),
+            exact=True,
+        ).count
 
     def list_documents(
         self,
@@ -79,11 +92,8 @@ class DocumentService:
         documents = []
         for doc in records:
 
-            # Query Chroma for live chunk count
-            chroma_res = self.retriever.collection.get(
-                where={"document_id": doc.document_id}
-            )
-            total_chunks = len(chroma_res.get("ids", []))
+            # Query Qdrant for live chunk count
+            total_chunks = self._count_chunks(doc.document_id)
 
             documents.append(
                 DocumentDescription(
@@ -111,7 +121,7 @@ class DocumentService:
         )
 
     def get_document(self, document_id: str) -> DocumentDescription:
-        """Fetch single document metadata from SQLite and ChromaDB and return a DocumentDescription as response"""
+        """Fetch single document metadata from SQLite and Qdrant and return a DocumentDescription as response"""
 
         # Find document having required document_id in SQLite
         doc = self.db.scalar(select(Document).where(Document.document_id == document_id))
@@ -121,11 +131,8 @@ class DocumentService:
                 detail=f"Document with ID '{document_id}' not found",
             )
 
-        # Find document having required document_id in chroma
-        chroma_res = self.retriever.collection.get(
-            where={"document_id": document_id}
-        )
-        total_chunks = len(chroma_res.get("ids", []))
+        # Find document having required document_id in Qdrant
+        total_chunks = self._count_chunks(document_id)
 
         return DocumentDescription(
             document_id=doc.document_id,
@@ -144,7 +151,7 @@ class DocumentService:
         limit: int = 50,
         offset: int = 0,
     ) -> GetDocumentChunksResponse:
-        """Inspect text chunks and metadatas from ChromaDB"""
+        """Inspect text chunks and metadatas from Qdrant"""
 
         # Find document having required document_id in SQLite
         doc = self.db.scalar(select(Document).where(Document.document_id == document_id))
@@ -154,28 +161,50 @@ class DocumentService:
                 detail=f"Document with ID '{document_id}' not found",
             )
 
-        # Retrive all chunks of document having required document_id for current pagination limits
-        chroma_res = self.retriever.collection.get(
-            where={"document_id": document_id},
-            include=["documents", "metadatas"],
-            limit=limit,
-            offset=offset,
-        )
-        ids = chroma_res.get("ids", [])
-        docs = chroma_res.get("documents", [])
-        metas = chroma_res.get("metadatas", [])
+        if limit < 1 or offset < 0:
+            raise ValueError("Chunk limit must be positive and offset must be non-negative")
 
-        all_ids = self.retriever.collection.get(
-            where={"document_id": document_id}
-        ).get("ids", []) # Total chunks across entire document (beyond pagination limits)
+        total_chunks = self._count_chunks(document_id)
+        records = []
+        cursor = None
+        remaining = offset
+        
+        # Return a maximum of 50 chunks ahead of offset value passed using Qdrant cursor
+        if offset < total_chunks:
+
+            # Skip chunks and move Qdrant pointer to offset
+            while remaining:
+                skipped, cursor = self.retriever.client.scroll(
+                    collection_name=self.retriever.collection_name,
+                    scroll_filter=self._make_document_filter(document_id),
+                    limit=min(remaining, 256),
+                    offset=cursor,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                remaining -= len(skipped)
+                if not skipped or cursor is None:
+                    break
+
+            # Fetch the chunks falling under the filter of offset and limit
+            if offset == 0 or (remaining == 0 and cursor is not None):
+                records, _ = self.retriever.client.scroll(
+                    collection_name=self.retriever.collection_name,
+                    scroll_filter=self._make_document_filter(document_id),
+                    limit=limit,
+                    offset=cursor,
+                    with_payload=True,
+                    with_vectors=False,
+                )
 
         # Compile chunk descriptions
         chunk_items = []
-        for chunk_id, text, meta in zip(ids, docs, metas):
-            meta_dict = meta or {}
+        for record in records:
+            meta_dict = dict(record.payload or {})
+            text = meta_dict.pop("text", "")
             chunk_items.append(
                 ChunkDescription(
-                    chunk_id=chunk_id,
+                    chunk_id=meta_dict.get("chunk_id", str(record.id)),
                     chunk_index=meta_dict.get("chunk_index", 0),
                     page=meta_dict.get("page", 1),
                     text=text or "",
@@ -186,7 +215,7 @@ class DocumentService:
         return GetDocumentChunksResponse(
             document_id=document_id,
             filename=doc.filename,
-            total_chunks=len(all_ids),
+            total_chunks=total_chunks,
             chunks=chunk_items,
         )
 
@@ -195,7 +224,7 @@ class DocumentService:
         document_id: str,
         product_id: str,
     ) -> DocumentDescription:
-        """Update product_id of document having required document_id in SQLite and Chroma"""
+        """Update product_id of document having required document_id in SQLite and Qdrant"""
 
         # Find document having required document_id in SQLite
         doc = self.db.scalar(select(Document).where(Document.document_id == document_id))
@@ -210,28 +239,14 @@ class DocumentService:
         self.db.commit()
         self.db.refresh(doc)
 
-        # Update product_id in ChromaDB chunk metadatas
-
-        # Find all chunks where of document having document_id
-        chroma_res = self.retriever.collection.get(
-            where={"document_id": document_id},
-            include=["metadatas"],
-        )
-        ids = chroma_res.get("ids", [])
-        metadatas = chroma_res.get("metadatas", [])
-
         # Update product_id in every chunk of the document
-        if ids and metadatas:
-            updated_metas = []
-            for m in metadatas:
-                merged = dict(m or {})
-                merged["product_id"] = product_id
-                updated_metas.append(merged)
-
-            self.retriever.collection.update(
-                ids=ids,
-                metadatas=updated_metas,
-            )
+        self.retriever.client.set_payload(
+            collection_name=self.retriever.collection_name,
+            payload={"product_id": product_id},
+            points=self._make_document_filter(document_id),
+            wait=True,
+        )
+        total_chunks = self._count_chunks(document_id)
 
         return DocumentDescription(
             document_id=doc.document_id,
@@ -239,13 +254,13 @@ class DocumentService:
             product_id=doc.product_id,
             size_bytes=doc.size_bytes,
             sha256=doc.sha256,
-            total_chunks=len(ids),
+            total_chunks=total_chunks,
             status="indexed",
             created_at=doc.created_at,
         )
 
     def delete_document(self, document_id: str) -> DeleteDocumentResponse:
-        """Delete document from ChromaDB, SQLite and MinIO"""
+        """Delete document from Qdrant, SQLite and MinIO"""
 
         # Find document having required document_id
         doc = self.db.scalar(select(Document).where(Document.document_id == document_id))
@@ -255,12 +270,15 @@ class DocumentService:
                 detail=f"Document with ID '{document_id}' not found",
             )
 
-        # Remove vectors from ChromaDB 
-        chroma_res = self.retriever.collection.get(where={"document_id": document_id})
-        deleted_chunks_count = len(chroma_res.get("ids", []))
+        # Remove vectors from Qdrant
+        deleted_chunks_count = self._count_chunks(document_id)
         if deleted_chunks_count > 0:
-            self.retriever.collection.delete(where={"document_id": document_id})
-            logger.info("Purged %d vectors from ChromaDB for doc_id=%s", deleted_chunks_count, document_id)
+            self.retriever.client.delete(
+                collection_name=self.retriever.collection_name,
+                points_selector=models.FilterSelector(filter=self._make_document_filter(document_id)),
+                wait=True,
+            )
+            logger.info("Purged %d vectors from Qdrant for doc_id=%s", deleted_chunks_count, document_id)
 
         # Delete relational record from SQLite
         self.db.delete(doc)
@@ -268,6 +286,7 @@ class DocumentService:
         logger.info("Deleted SQLite metadata record for doc_id=%s", document_id)
 
         # Remove raw binary from MinIO
+        storage_removed = True
         try:
             self.uploader.client.delete_object(
                 Bucket=self.uploader.bucket_name,
@@ -275,6 +294,7 @@ class DocumentService:
             )
             logger.info("Deleted MinIO binary object for doc_id=%s", document_id)
         except Exception as err:
+            storage_removed = False
             logger.warning("Failed to delete MinIO object for doc_id=%s: %s", document_id, err)
 
         return DeleteDocumentResponse(
@@ -282,6 +302,5 @@ class DocumentService:
             status="deleted",
             deleted_chunks=deleted_chunks_count,
             database_removed=True,
-            storage_removed=True,
+            storage_removed=storage_removed,
         )
-

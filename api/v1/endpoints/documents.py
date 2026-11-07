@@ -26,7 +26,7 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
     summary="Upload and ingest documents",
     description=(
         "Upload one or more documents, parse text, chunk, generate embeddings, "
-        "and index them in ChromaDB synchronously."
+        "and index them in Qdrant synchronously."
     ),
 )
 async def ingest_documents(
@@ -90,7 +90,7 @@ async def get_document(
     "/{document_id}/chunks",
     response_model=GetDocumentChunksResponse,
     summary="Get document chunks",
-    description="Inspect extracted text chunks and chunk-level metadata stored in ChromaDB.",
+    description="Inspect extracted text chunks and chunk-level metadata stored in Qdrant.",
 )
 async def get_document_chunks(
     document_id: str,
@@ -111,7 +111,7 @@ async def get_document_chunks(
     "/{document_id}",
     response_model=DocumentDescription,
     summary="Update document metadata",
-    description="Update metadata attributes (such as product_id) across SQLite and all associated chunks in ChromaDB.",
+    description="Update metadata attributes (such as product_id) across SQLite and all associated chunks in Qdrant.",
 )
 async def update_document_metadata(
     document_id: str,
@@ -130,7 +130,7 @@ async def update_document_metadata(
     "/{document_id}",
     response_model=DeleteDocumentResponse,
     summary="Delete document",
-    description="Irreversibly delete a document and cascade deletion across ChromaDB vectors, SQLite metadata, and MinIO storage.",
+    description="Irreversibly delete a document and cascade deletion across Qdrant vectors, SQLite metadata, and MinIO storage.",
 )
 async def delete_document(
     document_id: str,
@@ -138,4 +138,3 @@ async def delete_document(
 ) -> DeleteDocumentResponse:
     
     return service.delete_document(document_id=document_id)
-

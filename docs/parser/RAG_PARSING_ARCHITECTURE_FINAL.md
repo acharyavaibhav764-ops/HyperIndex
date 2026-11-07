@@ -37,7 +37,7 @@ Don't send every document through one heavy "does everything" parser, and don't 
                               [optional] contextual
                              chunk-header generation
                                       │
-                                embeddings → Chroma
+                                embeddings → Qdrant
 ```
 
 ### The PDF branch — routed page by page, not document by document
