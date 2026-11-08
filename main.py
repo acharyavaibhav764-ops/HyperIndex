@@ -29,13 +29,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Honeywell RAG", version="1.0.0", lifespan=lifespan)
 
 
-@app.get("/", include_in_schema=False)
-@app.get("/swagger", include_in_schema=False)
-async def docs_redirect() -> RedirectResponse:
-    """Redirect root and /swagger requests directly to Swagger UI."""
-    return RedirectResponse(url="/docs")
-
-
 # Global Exception Handlers
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:

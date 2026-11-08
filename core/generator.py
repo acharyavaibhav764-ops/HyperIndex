@@ -4,11 +4,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from config import settings
-from .pipeline_config import (
-    DEFAULT_PROMPT_TEMPLATE,
-    DEFAULT_SYSTEM_PROMPT,
-    pipeline_settings,
-)
+from .pipeline_config import pipeline_settings
 
 
 class GenerationError(Exception):
