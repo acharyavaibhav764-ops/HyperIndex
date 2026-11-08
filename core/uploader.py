@@ -1,6 +1,8 @@
+import io
 import logging
-from typing import Any
+import re
 from pathlib import PurePath
+from typing import Any
 from uuid import uuid4
 
 import boto3
@@ -18,8 +20,35 @@ class StorageError(Exception):
     pass
 
 
+def make_family_id(filename: str) -> str:
+    """
+    Derive a stable, URL-safe document-family slug from a filename.
+
+    The slug is used as the second-level folder in the MinIO hierarchy:
+        products/{product_id}/{family_id}/v{n}/{filename}
+
+    A short random suffix ensures uniqueness across unrelated documents
+    that happen to share a base name.
+    """
+    base = PurePath(filename).stem
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", base).strip("_").lower()[:60]
+    return f"{slug}_{uuid4().hex[:6]}"
+
+
+def build_storage_path(
+    product_id: str, doc_family_id: str, version: int, filename: str
+) -> str:
+    """
+    Return the hierarchical MinIO object key for a versioned document.
+
+    Example:
+        products/TC500/installation_manual_a8f3c1/v2/installation_manual_2024.pdf
+    """
+    return f"products/{product_id}/{doc_family_id}/v{version}/{filename}"
+
+
 class Uploader:
-    """MINIO interaction class for file storage:
+    """MINIO interaction class for file storage.
 
     Attributes:
         bucket_name: Target bucket in MinIO
@@ -27,8 +56,10 @@ class Uploader:
 
     Methods:
         ensure_bucket()
-        upload_files()
+        upload_files()          – legacy flat-key upload (kept for compat)
+        upload_file_bytes()     – versioned hierarchical upload
         download_file()
+        delete_object()
     """
 
     def __init__(self, bucket_name: str | None = None) -> None:
@@ -45,7 +76,7 @@ class Uploader:
         )
 
     def ensure_bucket(self) -> None:
-        """Create new bucket if it doesn't"""
+        """Create new bucket if it doesn't exist."""
 
         try:
             self.client.head_bucket(Bucket=self.bucket_name)
@@ -59,7 +90,7 @@ class Uploader:
                 raise StorageError("Unable to create the file bucket") from create_error
 
     def upload_files(self, files: list[UploadFile]) -> list[dict[str, Any]]:
-        """Upload a list of files to MinIO and return their metadata in a list."""
+        """Upload a list of files to MinIO with flat UUID keys (legacy path)."""
 
         uploaded_files: list[dict[str, Any]] = []
         for file in files:
@@ -110,6 +141,49 @@ class Uploader:
 
         return uploaded_files
 
+    def upload_file_bytes(
+        self,
+        content: bytes,
+        object_key: str,
+        filename: str,
+        content_type: str = "application/octet-stream",
+        extra_metadata: dict[str, str] | None = None,
+    ) -> None:
+        """
+        Upload raw bytes directly to a hierarchical object key.
+
+        S3 user-defined metadata values must be strings; all version/lineage
+        data are coerced before being stored so the MinIO console can display
+        them without further processing.
+
+        Args:
+            content:        Raw file bytes already in memory.
+            object_key:     Full hierarchical key, e.g.
+                            ``products/{pid}/{family}/v{n}/{filename}``
+            filename:       Original filename stored in S3 metadata.
+            content_type:   MIME type of the file.
+            extra_metadata: Additional string key/value pairs to store as S3
+                            object metadata (version, is_latest, etc.).
+        """
+        metadata: dict[str, str] = {"filename": filename, **(extra_metadata or {})}
+        try:
+            self.client.put_object(
+                Bucket=self.bucket_name,
+                Key=object_key,
+                Body=content,
+                ContentType=content_type,
+                Metadata=metadata,
+            )
+        except (ClientError, OSError) as error:
+            logger.exception("Versioned upload failed | key=%s", object_key)
+            raise StorageError(f"Unable to upload {filename} to {object_key}") from error
+
+        logger.info(
+            "Versioned upload successful | key=%s | size=%d bytes",
+            object_key,
+            len(content),
+        )
+
     def download_file(self, file_id: str) -> tuple[bytes, str]:
         """Retrieve raw file bytes and original filename from MinIO."""
 
@@ -122,3 +196,13 @@ class Uploader:
 
         filename = response.get("Metadata", {}).get("filename", file_id)
         return content, filename
+
+    def delete_object(self, object_key: str) -> None:
+        """Delete a single object from MinIO by its full key."""
+
+        try:
+            self.client.delete_object(Bucket=self.bucket_name, Key=object_key)
+            logger.info("Deleted MinIO object | key=%s", object_key)
+        except (ClientError, OSError) as error:
+            logger.warning("Failed to delete MinIO object | key=%s | %s", object_key, error)
+            raise StorageError(f"Unable to delete object {object_key}") from error

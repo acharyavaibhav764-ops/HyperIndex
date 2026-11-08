@@ -1,5 +1,6 @@
 """Core package exports."""
 from .chunker import Chunker
+from .dedup import MinHashDeduplicator
 from .embeddings import Embeddings
 from .generator import GenerationError, Generator
 from .parsers import (
@@ -14,7 +15,7 @@ from .parsers import (
 )
 from .pipeline_config import PipelineSettings, pipeline_settings
 from .retriever import Retriever
-from .uploader import StorageError, Uploader
+from .uploader import StorageError, Uploader, build_storage_path, make_family_id
 
 # Backward-compatibility alias
 Parser = ParserRouter
@@ -29,6 +30,7 @@ __all__ = [
     "LibreOfficeConversionError",
     "LibreOfficeConverter",
     "LibreOfficeNotFoundError",
+    "MinHashDeduplicator",
     "Parser",
     "ParserRouter",
     "PipelineSettings",
@@ -38,6 +40,6 @@ __all__ = [
     "TextParser",
     "Uploader",
     "UnsupportedFileError",
+    "build_storage_path",
+    "make_family_id",
 ]
-
-

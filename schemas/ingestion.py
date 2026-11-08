@@ -8,7 +8,20 @@ class DocumentIngestItem(BaseModel):
     size_bytes: int = Field(..., description="File size in bytes")
     collection: str = Field(..., description="Qdrant collection name")
     total_chunks: int = Field(..., description="Number of chunks generated and indexed")
-    status: str = Field(default="indexed", description="Ingestion status: indexed or duplicate")
+    status: str = Field(
+        default="indexed",
+        description="Ingestion status: 'indexed', 'new_version', or 'duplicate'",
+    )
+
+    # Versioning fields
+    version: int = Field(default=1, description="Version number assigned to this document")
+    doc_family_id: str = Field(default="", description="Stable family ID grouping all versions of this document")
+    parent_id: str | None = Field(default=None, description="document_id of the previous version, if any")
+    storage_path: str = Field(default="", description="Hierarchical MinIO object key")
+    similarity_score: float | None = Field(
+        default=None,
+        description="Jaccard similarity score against the matched parent version (None for new families or exact duplicates)",
+    )
 
 
 class DocumentIngestResponse(BaseModel):

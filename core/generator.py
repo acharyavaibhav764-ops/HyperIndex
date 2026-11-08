@@ -44,8 +44,12 @@ class Generator:
         port = ollama_port or settings.ollama_port
         self.ollama_url = f"http://{host}:{port}/api/generate"
         self.model = model or pipeline_settings.ollama_model
-        self.system_prompt = system_prompt or pipeline_settings.system_prompt
-        self.prompt_template = prompt_template or pipeline_settings.prompt_template
+        self.system_prompt = (
+            system_prompt or pipeline_settings.system_prompt or DEFAULT_SYSTEM_PROMPT
+        )
+        self.prompt_template = (
+            prompt_template or pipeline_settings.prompt_template or DEFAULT_PROMPT_TEMPLATE
+        )
 
     def build_prompt(
         self,

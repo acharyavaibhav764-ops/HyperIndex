@@ -1,5 +1,6 @@
 import io
 import logging
+import re
 from docling.datamodel.base_models import InputFormat
 from docling.document_converter import (
     DocumentConverter,
@@ -52,7 +53,7 @@ def _build_vlm_converter() -> DocumentConverter:
         picture_description_options=picture_opts,
     )
 
-    # Update the vanilla document converter with the VLM engine config
+    # Return DocumentConverter with options
     return DocumentConverter(
         format_options={
             InputFormat.DOCX: WordFormatOption(pipeline_options=pipeline_options),
@@ -62,31 +63,16 @@ def _build_vlm_converter() -> DocumentConverter:
 
 
 def _inject_picture_descriptions(doc: DoclingDocument) -> None:
-    """Inject picture descriptions from doc.pictures into the text stream of the docling document."""
+    """Inject picture descriptions into the DoclingDocument."""
 
-    import re
     from docling_core.types.doc import PictureDescriptionData
 
+    # Filter out empty picture descriptions
     for picture in doc.pictures:
-
-        # Determine raw description from either picture.meta.description or picture.annotations
-        raw_text = ""
-
-        meta_desc = getattr(getattr(picture, "meta", None), "description", None)
-        if meta_desc and getattr(meta_desc, "text", None):
-            raw_text = meta_desc.text
-        
-        elif getattr(picture, "annotations", None):
-            for ann in picture.annotations:
-                if isinstance(ann, PictureDescriptionData) and getattr(ann, "text", None):
-                    raw_text = ann.text
-                    break
-
-        if not raw_text:
-            continue
-
-        # Strip tokens like <end_of_utterance>
-        cleaned = re.sub(r"<[a-z_]{1,40}>", "", raw_text)
+        meta_desc = getattr(picture.meta, "description", None)
+        raw_text = getattr(meta_desc, "text", "") or ""
+        cleaned = re.sub(r"<!--\s*([a-zA-Z_]+)\s*-->", "", raw_text)
+        cleaned = re.sub(r"<!--.*?-->", "", cleaned, flags=re.DOTALL)
         cleaned = re.sub(r"<[a-z_]{0,40}\s*$", "", cleaned).strip()
         if not cleaned:
             continue
@@ -145,7 +131,7 @@ def _promote_pptx_pseudo_headings(doc: DoclingDocument) -> None:
 
 class DoclingParser(BaseParser):
     """
-    Parse Microsoft Office documents (Word and PowerPoint) into a DoclingDocument.
+    Parse Microsoft Office documents (Word and PowerPoint) and PDF documents into a DoclingDocument.
     
     Attributes:
         _converter: DocumentConverter class from docling for text purely
@@ -158,10 +144,10 @@ class DoclingParser(BaseParser):
         _convert_with_vlm()
     """
 
-    SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".docx", ".pptx"})
+    SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".docx", ".pptx", ".pdf"})
 
     def __init__(self) -> None:
-        """Instantiate shared DocumentConverter(s) for Office formats."""
+        """Instantiate shared DocumentConverter(s) for Office & PDF formats."""
 
         self._converter: DocumentConverter | None = None # Initially None to prevent startup delay
         self._converter_vlm: DocumentConverter | None = None # Initially None due to heavyness of VLMs
@@ -170,17 +156,17 @@ class DoclingParser(BaseParser):
     # BASE PARSER INSTANCE
 
     def can_handle(self, ext: str) -> bool:
-        """Return True for .docx and .pptx extensions."""
+        """Return True for .docx, .pptx, and .pdf extensions."""
 
         return ext.lower() in self.SUPPORTED_EXTENSIONS
 
     def parse(self, file_bytes: bytes, filename: str, **kwargs) -> DoclingDocument:
-        """Convert raw Office file bytes to a DoclingDocument."""
+        """Convert raw file bytes to a DoclingDocument."""
 
         stream = DocumentStream(name=filename, stream=io.BytesIO(file_bytes))
 
-        # Convert with VLM only if picture description enabled
-        if pipeline_config.pipeline_settings.enable_picture_description:
+        # Convert with VLM only if picture description enabled and supported
+        if pipeline_config.pipeline_settings.enable_picture_description and not filename.lower().endswith(".pdf"):
             doc = self._convert_with_vlm(stream, filename)
         else:
             if self._converter is None:

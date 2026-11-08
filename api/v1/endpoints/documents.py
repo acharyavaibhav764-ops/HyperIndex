@@ -3,7 +3,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
-from api.deps import get_document_service, get_ingestion_service
+from api.deps import get_document_service, get_ingestion_service, get_version_check_service
+from schemas.check import DocumentCheckResponse
 from schemas.document import (
     DeleteDocumentResponse,
     DocumentDescription,
@@ -14,6 +15,7 @@ from schemas.document import (
 from schemas.ingestion import DocumentIngestResponse
 from services.document_service import DocumentService
 from services.ingestion_service import IngestionService
+from services.version_check_service import VersionCheckService
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -26,7 +28,9 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
     summary="Upload and ingest documents",
     description=(
         "Upload one or more documents, parse text, chunk, generate embeddings, "
-        "and index them in Qdrant synchronously."
+        "and index them in Qdrant synchronously.  Versioning is applied "
+        "automatically: exact duplicates are rejected immediately; near-duplicates "
+        "are stored as a new version under the same document family."
     ),
 )
 async def ingest_documents(
@@ -34,11 +38,42 @@ async def ingest_documents(
     product_id: str = Form(default="default", min_length=1),
     service: IngestionService = Depends(get_ingestion_service),
 ) -> DocumentIngestResponse:
-    
+
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
     return service.ingest_files(files=files, product_id=product_id)
+
+
+# POST /api/v1/documents/check
+@router.post(
+    "/check",
+    status_code=status.HTTP_200_OK,
+    response_model=DocumentCheckResponse,
+    summary="Dry-run version check (no upload)",
+    description=(
+        "Classify one or more files against the existing document index for a "
+        "given product without uploading, parsing, or embedding anything.\n\n"
+        "**Possible statuses per file:**\n"
+        "- `exact_duplicate` – identical bytes already exist (global SHA-256 match). "
+        "Returns the existing document's version and location.\n"
+        "- `new_version` – near-duplicate of a current document detected via MinHash. "
+        "Returns the matched document, current version, and what version this file "
+        "would receive on ingest.\n"
+        "- `new_document` – no match found; this file would be ingested as v1 of a "
+        "new document family."
+    ),
+)
+async def check_document_version(
+    files: list[UploadFile] = File(...),
+    product_id: str = Form(default="default", min_length=1),
+    service: VersionCheckService = Depends(get_version_check_service),
+) -> DocumentCheckResponse:
+
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    return service.check_files(files=files, product_id=product_id)
 
 
 # GET /api/v1/documents
@@ -58,7 +93,7 @@ async def list_documents(
     skip: int = Query(0, ge=0, description="Offset for pagination"),
     service: DocumentService = Depends(get_document_service),
 ) -> GetDocumentsResponse:
-    
+
     return service.list_documents(
         product_id=product_id,
         name_search=name_search,
@@ -81,7 +116,7 @@ async def get_document(
     document_id: str,
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentDescription:
-    
+
     return service.get_document(document_id=document_id)
 
 
@@ -98,7 +133,7 @@ async def get_document_chunks(
     offset: int = Query(0, ge=0, description="Offset for pagination"),
     service: DocumentService = Depends(get_document_service),
 ) -> GetDocumentChunksResponse:
-    
+
     return service.get_document_chunks(
         document_id=document_id,
         limit=limit,
@@ -118,7 +153,7 @@ async def update_document_metadata(
     payload: UpdateDocumentRequest,
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentDescription:
-    
+
     return service.update_document_metadata(
         document_id=document_id,
         product_id=payload.product_id,
@@ -136,5 +171,5 @@ async def delete_document(
     document_id: str,
     service: DocumentService = Depends(get_document_service),
 ) -> DeleteDocumentResponse:
-    
+
     return service.delete_document(document_id=document_id)

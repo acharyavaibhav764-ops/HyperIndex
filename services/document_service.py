@@ -285,17 +285,18 @@ class DocumentService:
         self.db.commit()
         logger.info("Deleted SQLite metadata record for doc_id=%s", document_id)
 
-        # Remove raw binary from MinIO
+        # Remove raw binary from MinIO using the versioned storage_path
         storage_removed = True
+        storage_key = getattr(doc, "storage_path", None) or document_id
         try:
             self.uploader.client.delete_object(
                 Bucket=self.uploader.bucket_name,
-                Key=document_id,
+                Key=storage_key,
             )
-            logger.info("Deleted MinIO binary object for doc_id=%s", document_id)
+            logger.info("Deleted MinIO binary object for doc_id=%s key=%s", document_id, storage_key)
         except Exception as err:
             storage_removed = False
-            logger.warning("Failed to delete MinIO object for doc_id=%s: %s", document_id, err)
+            logger.warning("Failed to delete MinIO object for doc_id=%s key=%s: %s", document_id, storage_key, err)
 
         return DeleteDocumentResponse(
             document_id=document_id,

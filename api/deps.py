@@ -15,7 +15,9 @@ from core import (
 from db.session import get_db
 from services.document_service import DocumentService
 from services.ingestion_service import IngestionService
+from services.product_service import ProductService
 from services.rag_service import RAGService
+from services.version_check_service import VersionCheckService
 
 
 # Core Component Providers (Lazy Singletons via @lru_cache)
@@ -105,3 +107,16 @@ def get_document_service(
         uploader=uploader if not isinstance(uploader, params.Depends) else get_uploader(),
     )
 
+
+def get_version_check_service(
+    db: Session = Depends(get_db),
+) -> VersionCheckService:
+    resolved_db = db if not isinstance(db, params.Depends) else None
+    return VersionCheckService(db=resolved_db)
+
+
+def get_product_service(
+    db: Session = Depends(get_db),
+) -> ProductService:
+    resolved_db = db if not isinstance(db, params.Depends) else None
+    return ProductService(db=resolved_db)
