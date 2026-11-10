@@ -1,7 +1,7 @@
-# Honeywell Virtual Assistant
+# HyperIndex
 
 <p align="center">
-	<img src="https://img.shields.io/badge/HONEYWELL-Document%20Intelligence-EA1B0C?style=for-the-badge&labelColor=111827" alt="Honeywell Document Intelligence" />
+	<img src="https://img.shields.io/badge/HyperIndex-Document%20Intelligence-6366F1?style=for-the-badge&labelColor=111827" alt="HyperIndex Document Intelligence" />
 </p>
 
 <p align="center"><strong>Turn operational documents into grounded, searchable answers.</strong><br />Upload files, parse them into chunks, retrieve the most relevant context, and generate answers from a local LLM with source-aware metadata.</p>
@@ -17,9 +17,9 @@
 
 ## 🚀 Overview
 
-Honeywell Virtual Assistant is a local document intelligence service built on FastAPI. It stores uploaded files, extracts text from common document formats, embeds the text into ChromaDB, searches for relevant chunks, and then calls Ollama to generate grounded answers with traceable source metadata.
+HyperIndex is a local document intelligence service built on FastAPI. It stores uploaded files, extracts text from common document formats, embeds the text into ChromaDB, searches for relevant chunks, and then calls Ollama to generate grounded answers with traceable source metadata.
 
-This project is designed for internal document retrieval and Q&A over technical and operational documents, especially where a local-first workflow is preferred over cloud-only ingestion.
+HyperIndex is designed for document retrieval and Q&A over technical and operational documents, especially where a local-first, privacy-respecting workflow is preferred over cloud-only ingestion.
 
 ## ✨ Features
 
@@ -85,8 +85,8 @@ POST /api/v1/query
 ### Clone and start the stack
 
 ```powershell
-git clone https://github.com/hruthikeshb/honeywell-virtual-assistant.git
-Set-Location honeywell-virtual-assistant
+git clone https://github.com/acharyavaibhav764-ops/HyperIndex.git
+Set-Location HyperIndex
 docker compose up --build -d
 ```
 
@@ -196,9 +196,9 @@ The application reads configuration from environment variables, with defaults de
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DATABASE_URL` | `sqlite:///./honeywell.db` | SQLite database for document metadata |
+| `DATABASE_URL` | `sqlite:///./hyperindex.db` | SQLite database for document metadata |
 | `MINIO_ENDPOINT` | `minio:9000` | MinIO host inside Docker |
-| `MINIO_BUCKET` | `honeywell-files` in Compose | Bucket name for uploaded files |
+| `MINIO_BUCKET` | `hyperindex-files` in Compose | Bucket name for uploaded files |
 | `MINIO_ACCESS_KEY` | from `MINIO_ROOT_USER` | MinIO access key |
 | `MINIO_SECRET_KEY` | from `MINIO_ROOT_PASSWORD` | MinIO secret key |
 | `CHROMA_HOST` | unset | ChromaDB host for non-default setups |
